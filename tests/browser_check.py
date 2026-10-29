@@ -10,7 +10,7 @@ URL = (Path(__file__).resolve().parents[1] / "index.html").as_uri()
 TEST_PAGES = []
 
 
-def open_game(browser, width=1366, height=900, touch=False, storage=True, url=URL, offline=True):
+def open_game(browser, width=1366, height=900, touch=False, storage=True, url=URL, offline=True, background_render=False):
     context = browser.contexts[0]
     browser_cdp = browser.new_browser_cdp_session()
     with context.expect_page() as created:
@@ -42,6 +42,15 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True, url=UR
         })()""")
     elif storage is False:
         page.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw Error('Storage disabled')}})")
+    if background_render:
+        # A covered desktop window can suspend compositor-driven RAF even
+        # with focus emulation. Only the demo's drawing clock uses timers;
+        # game state continues to change exclusively through normal input.
+        page.add_init_script("""(() => {
+          window.__nativeFrames={request:requestAnimationFrame,cancel:cancelAnimationFrame};
+          window.requestAnimationFrame=fn=>setTimeout(()=>fn(performance.now()),16);
+          window.cancelAnimationFrame=id=>clearTimeout(id);
+        })()""")
     errors, requests = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda req: requests.append(req.url) if req.url.startswith("http") else None)
@@ -77,6 +86,19 @@ def fixture(page, js=""):
       if(extra) (new Function('g',extra))(g);
       Bygga.refresh();
     }""", js)
+
+
+def select_with_keyboard(page, slot):
+    # Focus/resize cancellation may legitimately clear a preview between input
+    # events. Verify it before reading coordinates, and retry only selection.
+    for _ in range(3):
+        page.keyboard.press(str(slot + 1))
+        selection = page.evaluate("({slot:Bygga.selected,cursor:Bygga.cursor})")
+        if selection["slot"] == slot and selection["cursor"] is not None:
+            return selection["cursor"]
+        page.wait_for_timeout(60)
+    raise AssertionError({"wanted_slot": slot, "selection": selection,
+                          "state": page.evaluate("({over:Bygga.game.over,screen:!document.querySelector('#screen').hidden,dialogs:[...document.querySelectorAll('dialog[open]')].map(d=>d.id)})")})
 
 
 def check_layouts(browser):
@@ -261,6 +283,148 @@ def check_audio(browser):
     print(f"PASS rendered stereo effects, no clipping, mute silence: {stats}", flush=True)
 
 
+def check_stones(browser):
+    page, cdp, errors, requests = open_game(browser, 390, 844, True)
+    tap(page, cdp, "#play")
+    fixture(page, "g.score=4999;g.random=()=>.999;g.tray[0]={shape:'single-0',color:5};")
+    gx, gy, unit = board_geometry(page)
+    tap(page, cdp, '[data-slot="0"]')
+    touch_event(cdp, "touchStart", [point(gx + .5 * unit, gy + .5 * unit)])
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.score") == 5000
+    assert page.evaluate("Bygga.game.board[63]===ByggaEngine.STONE")
+    assert page.locator("#toast strong").inner_text() == "En ruta blev sten"
+    assert "sten" in page.locator("#board").get_attribute("aria-label")
+    state = page.evaluate("Bygga.game.serialize()")
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.evaluate("Bygga.game.serialize()") == state
+    tap(page, cdp, "#play")
+    # A native tap cannot place a three-cell line across the stone at (7,7).
+    tap(page, cdp, '[data-slot="1"]')
+    touch_event(cdp, "touchStart", [point(gx + 5.5 * unit, gy + 7.5 * unit)])
+    assert page.evaluate("Bygga.game.preview(1,5,7)") is None
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.serialize()") == state
+    fixture(page, "g.score=5000;g.board[0]=ByggaEngine.STONE;for(let i=1;i<7;i++)g.board[i]=2;g.tray[0]={shape:'single-0',color:5};")
+    tap(page, cdp, '[data-slot="0"]')
+    touch_event(cdp, "touchStart", [point(gx + 7.5 * unit, gy + .5 * unit)])
+    assert page.evaluate("Bygga.game.preview(0,7,0).count") == 0
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.board.slice(0,8)") == [-1, 2, 2, 2, 2, 2, 2, 5]
+    assert page.evaluate("Bygga.game.totalLines") == 0
+    page.wait_for_timeout(850)
+    pixel = page.evaluate("""() => {
+      const c=document.querySelector('#board'),s=c.width/512;
+      return [...c.getContext('2d').getImageData((12+.3*61)*s,(12+.55*61)*s,1,1).data];
+    }""")
+    assert pixel[3] == 255 and 70 < pixel[0] < 180 and abs(pixel[0] - pixel[2]) < 45, pixel
+    page.screenshot(path="/tmp/bygga-stones-phone.png")
+    assert not errors, errors
+    assert not requests, requests
+    page.close()
+    print("PASS milestone stone, native-touch collision, blocked clear preview, rendering, save/resume offline", flush=True)
+
+
+def check_rotation_mouse_keyboard(browser):
+    page, _, errors, _ = open_game(browser)
+    page.locator("#play").click()
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    page.locator('[data-slot="0"]').click(button="right")
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 1
+    assert page.evaluate("Bygga.game.moves") == 0
+    state = page.evaluate("Bygga.game.serialize()")
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.evaluate("Bygga.game.serialize()") == state
+    page.locator("#play").click()
+    page.keyboard.press("1"); page.keyboard.press("r")
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 2
+    page.keyboard.press("Shift+R")
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 1
+    gx, gy, unit = board_geometry(page)
+    page.mouse.move(gx + unit, gy + unit)
+    page.keyboard.press("1")
+    aimed = page.evaluate("Bygga.cursor")
+    page.mouse.move(5, 5)
+    assert page.evaluate("Bygga.cursor") == aimed, "Mouse leaving must not erase a keyboard preview"
+    # Exercise the autoplay recovery path with a genuine game cancellation.
+    page.evaluate("document.addEventListener('keydown',()=>queueMicrotask(()=>window.dispatchEvent(new Event('blur'))),{once:true})")
+    assert select_with_keyboard(page, 0) == {"x": 0, "y": 0}
+    page.keyboard.press("Enter")
+    assert page.evaluate("[0,8,16].map(i=>Bygga.game.board[i])") == [4, 4, 4]
+    assert page.evaluate("Bygga.game.score") == 3
+    fixture(page, "g.board.fill(ByggaEngine.STONE);for(let y=1;y<=3;y++)g.board[y*8+3]=0;g.tray=[{shape:'line3-0',color:2},null,null];")
+    assert "unavailable" not in page.locator('[data-slot="0"]').get_attribute("class")
+    page.locator('[data-slot="0"]').click(button="right")
+    page.keyboard.press("1")
+    assert page.evaluate("Bygga.cursor") == {"x": 3, "y": 1}
+    page.keyboard.press("Enter")
+    assert page.evaluate("Bygga.game.over")
+    assert not errors, errors
+    page.close()
+    print("PASS right-click, R/Shift+R, rotated placement/save/resume, rotation-only fit stays playable", flush=True)
+
+
+def check_rotation_touch(browser, width, height):
+    page, cdp, errors, _ = open_game(browser, width, height, True)
+    tap(page, cdp, "#play")
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    r = page.locator('[data-slot="0"]').bounding_box()
+    first = point(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+    second = point(first["x"] + 65, first["y"], 2)
+    turned = point(first["x"], first["y"] - 65, 2)
+    touch_event(cdp, "touchStart", [first])
+    touch_event(cdp, "touchStart", [first, second])
+    touch_event(cdp, "touchMove", [first, turned])
+    page.wait_for_function("Bygga.game.tray[0].rotation===3")
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 3
+    touch_event(cdp, "touchEnd", [first])
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.moves") == 0
+    assert page.evaluate("Bygga.selected") == 0
+    # Rotate during a lifted drag, remove the second finger, then continue
+    # dragging and release the first finger to place the new orientation.
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    gx, gy, unit = board_geometry(page)
+    origin = first
+    first = point(gx + 3.5 * unit, gy + 3 * unit + 24)
+    second = point(first["x"] + 65, first["y"], 2)
+    turned = point(first["x"], first["y"] + 65, 2)
+    touch_event(cdp, "touchStart", [origin])
+    touch_event(cdp, "touchMove", [first])
+    touch_event(cdp, "touchStart", [first, second])
+    touch_event(cdp, "touchMove", [first, turned])
+    page.wait_for_function("Bygga.game.tray[0].rotation===1")
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 1
+    # CDP touchEnd lists the contacts to lift, not the contacts that remain.
+    touch_event(cdp, "touchEnd", [turned])
+    target = point(gx + 4.5 * unit, gy + 4 * unit + 24)
+    touch_event(cdp, "touchMove", [target])
+    page.wait_for_function("Bygga.cursor?.x===4 && Bygga.cursor?.y===1")
+    assert page.evaluate("Bygga.cursor") == {"x": 4, "y": 1}
+    assert page.locator("#drag-piece").is_visible()
+    page.screenshot(path=f"/tmp/bygga-rotation-touch-{width}.png")
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.moves") == 1
+    assert page.evaluate("[12,20,28].map(i=>Bygga.game.board[i])") == [4, 4, 4]
+    # Ending the primary contact while two fingers are down also cannot drop.
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    touch_event(cdp, "touchStart", [origin])
+    touch_event(cdp, "touchMove", [first])
+    touch_event(cdp, "touchStart", [first, second])
+    touch_event(cdp, "touchMove", [first, turned])
+    page.wait_for_function("Bygga.game.tray[0].rotation===1")
+    touch_event(cdp, "touchEnd", [first])
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.moves") == 0
+    assert page.locator("#drag-piece").is_hidden()
+    assert page.evaluate("window.scrollY") == 0
+    assert not errors, errors
+    page.close()
+    print(f"PASS native two-finger twist both directions, safe release order, rotate-drag-place {width}×{height}", flush=True)
+
+
 def check_audio_lifecycle(browser):
     page, cdp, errors, _ = open_game(browser, 390, 844, True)
     # Chromium cannot reproduce iOS routing. Exercise the optional policy API
@@ -370,28 +534,78 @@ def check_clear_survives_animation(browser):
     print("PASS surviving block and empty grid remain painted after the complete clear animation", flush=True)
 
 
-def play_runs(browser):
+def play_runs(browser, demo=False, record_dir=None):
     """Play from empty boards via actual input; inspect pixels after every move."""
-    page, _, errors, _ = open_game(browser)
+    import base64
+    import json
+
+    page, _, errors, _ = open_game(browser, 768 if demo else 1366, 900, background_render=demo)
     page.locator("#play").click()
+    if demo:
+        page.locator("#sound").click()
+    frame = 0
+    history = []
+    if record_dir:
+        record_dir.mkdir(parents=True, exist_ok=True)
+
+    def capture():
+        nonlocal frame
+        if record_dir:
+            # Read the actual game canvases and HUD without asking Chrome's
+            # background compositor to capture the window during user input.
+            shot = page.evaluate("""() => {
+              const c=document.createElement('canvas');c.width=innerWidth;c.height=innerHeight;
+              const ctx=c.getContext('2d');
+              const bg=ctx.createRadialGradient(c.width*.5,c.height*.35,0,c.width*.5,c.height*.35,c.height*.8);
+              bg.addColorStop(0,'#1d304d');bg.addColorStop(1,'#111c30');ctx.fillStyle=bg;ctx.fillRect(0,0,c.width,c.height);
+              for(const el of document.querySelectorAll('.board-wrap,.piece-slot')){
+                const r=el.getBoundingClientRect(),s=getComputedStyle(el);
+                ctx.beginPath();ctx.roundRect(r.x,r.y,r.width,r.height,parseFloat(s.borderRadius));
+                ctx.fillStyle=s.backgroundColor;ctx.fill();
+                if(parseFloat(s.borderWidth)>0){ctx.strokeStyle=s.borderColor;ctx.lineWidth=1;ctx.stroke()}
+              }
+              for(const el of document.querySelectorAll('#board,.piece-slot canvas')){
+                const r=el.getBoundingClientRect();ctx.globalAlpha=Number(getComputedStyle(el).opacity);
+                ctx.drawImage(el,r.x,r.y,r.width,r.height);
+              }
+              ctx.globalAlpha=1;ctx.textBaseline='top';
+              for(const el of document.querySelectorAll('.label,#score,#best,#combo-text,.slot-number')){
+                if(!el.checkVisibility())continue;
+                const r=el.getBoundingClientRect(),s=getComputedStyle(el);ctx.font=`${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;ctx.fillStyle=s.color;
+                ctx.fillText(el.textContent.trim(),r.x,r.y);
+              }
+              return c.toDataURL('image/jpeg',.9).split(',')[1];
+            }""")
+            (record_dir / f"frame-{frame:05d}.jpg").write_bytes(base64.b64decode(shot))
+            frame += 1
+
+    capture()
     total_moves = total_lines = 0
-    for run in range(3):
-        for turn in range(45):
+    runs = 1 if demo else 3
+    for run in range(runs):
+        for turn in range(180 if demo else 45):
             move = page.evaluate("""() => {
               const E=ByggaEngine,g=Bygga.game;
               if(g.over)return null;
               let best=null;
               g.tray.forEach((p,slot)=>{
                 if(!p)return;
-                const shape=E.getShape(p);
+                const seen=new Set();
+                for(let rotation=0;rotation<4;rotation++) {
+                const shape=E.getShape({...p,rotation}),key=JSON.stringify(shape.cells);
+                if(seen.has(key))continue;seen.add(key);
                 for(const {x,y} of E.placements(g.board,shape)) {
-                  const r=g.preview(slot,x,y),b=r.board;
-                  let concentration=0,holes=0;
+                  const r=E.simulate(g.board,shape,x,y,p.color),b=r.board;
+                  let concentration=0,holes=0,dead=0;
+                  const stoneRows=new Set(),stoneCols=new Set();
+                  b.forEach((v,i)=>{if(v===E.STONE){stoneRows.add(Math.floor(i/8));stoneCols.add(i%8)}});
                   for(let i=0;i<8;i++){
                     let row=0,col=0;
                     for(let j=0;j<8;j++){row+=!!b[i*8+j];col+=!!b[j*8+i]}
-                    concentration+=row*row+col*col;
+                    if(!stoneRows.has(i))concentration+=row*row;
+                    if(!stoneCols.has(i))concentration+=col*col;
                   }
+                  for(let i=0;i<64;i++)if(b[i]>0&&stoneRows.has(Math.floor(i/8))&&stoneCols.has(i%8))dead++;
                   for(let i=0;i<64;i++)if(!b[i]){
                     const neighbors=[];
                     if(i%8)neighbors.push(i-1);if(i%8<7)neighbors.push(i+1);
@@ -399,9 +613,11 @@ def play_runs(browser):
                     if(neighbors.every(n=>b[n]))holes++;
                   }
                   const remaining=g.tray.map((piece,i)=>i===slot?null:piece);
-                  const blocked=remaining.filter(p=>p&&!E.placements(b,E.getShape(p)).length).length;
-                  const value=r.count*100+concentration*.2-holes*12-blocked*90+y*.01-x*.01;
-                  if(!best||value>best.value)best={slot,x,y,width:shape.width,height:shape.height,value,clears:r.count,moves:g.moves};
+                  const blocked=remaining.filter(p=>p&&!E.hasMove(b,[p])).length;
+                  const room=E.placements(b,E.getShape({shape:'large-square-0'})).length;
+                  const value=r.count*120+concentration*.4-holes*16-blocked*180-dead*10+room*1.5+y*.01-x*.01;
+                  if(!best||value>best.value)best={slot,x,y,rotation,turns:(rotation-(p.rotation||0)+4)%4,width:shape.width,height:shape.height,value,clears:r.count,moves:g.moves};
+                }
                 }
               });
               return best;
@@ -410,7 +626,19 @@ def play_runs(browser):
                 break
             gx, gy, unit = board_geometry(page)
             r = page.locator(f'[data-slot="{move["slot"]}"]').bounding_box()
-            if run == 1:
+            for _ in range(move["turns"]):
+                page.locator(f'[data-slot="{move["slot"]}"]').click(button="right")
+            assert page.evaluate("slot=>Bygga.game.tray[slot].rotation||0", move["slot"]) == move["rotation"], {"move": move, "tray": page.evaluate("Bygga.game.tray")}
+            capture()
+            if demo:
+                aim = select_with_keyboard(page, move["slot"])
+                for _ in range(abs(move["x"] - aim["x"])):
+                    page.keyboard.press("ArrowRight" if move["x"] > aim["x"] else "ArrowLeft")
+                for _ in range(abs(move["y"] - aim["y"])):
+                    page.keyboard.press("ArrowDown" if move["y"] > aim["y"] else "ArrowUp")
+                capture()
+                page.keyboard.press("Enter")
+            elif run == 1:
                 page.mouse.click(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
                 page.mouse.click(gx + (move["x"] + .5) * unit, gy + (move["y"] + .5) * unit)
             else:
@@ -419,27 +647,34 @@ def play_runs(browser):
                 page.mouse.move(gx + (move["x"] + move["width"] / 2) * unit,
                                 gy + (move["y"] + move["height"] / 2) * unit, steps=5)
                 assert page.evaluate("Bygga.cursor") == {"x": move["x"], "y": move["y"]}, {"move": move, "cursor": page.evaluate("Bygga.cursor")}
+                capture()
                 page.mouse.up()
-            assert page.evaluate("Bygga.game.moves") == move["moves"] + 1, {"move": move, "selected": page.evaluate("Bygga.selected")}
+            assert page.evaluate("Bygga.game.moves") == move["moves"] + 1, {"move": move, "selected": page.evaluate("Bygga.selected"), "state": page.evaluate("Bygga.game.serialize()"), "announcement": page.locator("#announcement").inner_text()}
             page.wait_for_timeout(850 if move["clears"] else 210)
+            capture()
             assert not errors, errors
             rendered = page.evaluate("""() => {
               const c=document.querySelector('#board'),ctx=c.getContext('2d'),scale=c.width/512;
               const invisible=[];
               Bygga.game.board.forEach((color,i)=>{
                 const pixel=ctx.getImageData(Math.floor((12+(i%8+.5)*61)*scale),Math.floor((12+(Math.floor(i/8)+.5)*61)*scale),1,1).data;
-                if(pixel[3]!==255||(color&&pixel[0]+pixel[1]+pixel[2]<260))invisible.push(i);
+                if(pixel[3]!==255||(color>0&&pixel[0]+pixel[1]+pixel[2]<260))invisible.push(i);
               });
               return {alpha:ctx.globalAlpha,invisible};
             }""")
             assert rendered == {"alpha": 1, "invisible": []}, rendered
             total_moves += 1
             total_lines += move["clears"]
+            state = page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,stones:Bygga.game.board.filter(v=>v===ByggaEngine.STONE).length,over:Bygga.game.over})")
+            history.append({"move": move, "state": state})
+            if record_dir:
+                (record_dir / "moves.json").write_text(json.dumps(history, indent=2))
             if (turn + 1) % 15 == 0:
-                print(f"Playing run {run+1}: {turn+1} moves; {total_lines} lines cleared across runs; all pixels intact", flush=True)
-        page.screenshot(path=f"/tmp/bygga-played-run-{run+1}.png")
+                print(f"Playing run {run+1}: {state}; all pixels intact", flush=True)
+        if not demo:
+            page.screenshot(path=f"/tmp/bygga-played-run-{run+1}.png")
         print(f"PASS played run {run+1}: " + str(page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,over:Bygga.game.over})")), flush=True)
-        if run < 2:
+        if run < runs - 1:
             if page.locator("#screen").is_visible():
                 page.locator("#play").click()
             else:
@@ -447,7 +682,21 @@ def play_runs(browser):
                 if page.locator("#restart-dialog").is_visible():
                     page.locator("#confirm-restart").click()
     assert total_lines >= 10, (total_moves, total_lines)
-    page.close()
+    if record_dir:
+        (record_dir / "moves.json").write_text(json.dumps(history, indent=2))
+    if demo:
+        if page.locator("#screen").is_visible():
+            page.locator("#screen-secondary").click()
+        for _ in range(9):
+            capture()
+        if record_dir:
+            import shutil
+            shutil.copy2(record_dir / f"frame-{frame-1:05d}.jpg", "/tmp/bygga-playthrough-final.jpg")
+        page.evaluate("requestAnimationFrame=__nativeFrames.request;cancelAnimationFrame=__nativeFrames.cancel")
+        # Explicitly requested user-facing demonstration, not a leftover QA tab.
+        TEST_PAGES.remove(page)
+    else:
+        page.close()
     print(f"PASS actual input playthroughs: {total_moves} placements, {total_lines} cleared lines, canvas verified after every move", flush=True)
 
 
@@ -500,9 +749,12 @@ def check_installation(browser):
             page.locator("#install-help summary").click()
             assert page.locator("#install-help").get_attribute("open") is not None
             page.locator("#help-done").click()
+            fixture(page, "g.score=4999;g.random=()=>.999;g.tray[0]={shape:'single-0',color:3};")
             page.keyboard.press("1"); page.keyboard.press("Enter")
+            page.keyboard.press("2"); page.keyboard.press("r")
             saved = page.evaluate("Bygga.game.serialize()")
             assert saved["moves"] == 1
+            assert saved["board"][63] == -1 and saved["tray"][1]["rotation"] == 1
             # Deliver a new worker/bundle without discarding the current game.
             sw = served / "sw.js"
             updated, count = re.subn(r"const CACHE = `\$\{PREFIX\}[^`]+`;", "const CACHE = `${PREFIX}qa-update`;", sw.read_text())
@@ -558,10 +810,19 @@ if __name__ == "__main__":
     parser.add_argument("--playtest", action="store_true")
     parser.add_argument("--pwa-only", action="store_true")
     parser.add_argument("--audio-only", action="store_true")
+    parser.add_argument("--experiments-only", action="store_true")
+    parser.add_argument("--demo", action="store_true", help="Leave one background playthrough tab for review")
+    parser.add_argument("--record-dir", type=Path, help="Capture playthrough frames and move history")
     args = parser.parse_args()
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         try:
+            if args.experiments_only:
+                check_stones(browser)
+                check_rotation_mouse_keyboard(browser)
+                check_rotation_touch(browser, 390, 844)
+                check_rotation_touch(browser, 1024, 768)
+                raise SystemExit(0)
             if args.audio_only:
                 check_audio_lifecycle(browser)
                 check_audio(browser)
@@ -570,13 +831,17 @@ if __name__ == "__main__":
             if args.pwa_only:
                 check_installation(browser)
                 raise SystemExit(0)
-            if args.playtest:
-                play_runs(browser)
+            if args.playtest or args.demo:
+                play_runs(browser, demo=args.demo, record_dir=args.record_dir)
                 raise SystemExit(0)
             check_clear_survives_animation(browser)
             if args.clear_only:
                 raise SystemExit(0)
             if not args.effects_only:
+                check_stones(browser)
+                check_rotation_mouse_keyboard(browser)
+                check_rotation_touch(browser, 390, 844)
+                check_rotation_touch(browser, 1024, 768)
                 check_layouts(browser)
                 check_keyboard_saves(browser)
                 check_touch(browser, 390, 844)

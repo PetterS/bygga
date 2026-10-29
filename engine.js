@@ -2,6 +2,7 @@
   'use strict';
 
   const SIZE = 8;
+  const STONE = -1, STONE_INTERVAL = 5000;
   const SHAPES = [];
   const byId = new Map();
   const keyOf = cells => cells.map(([x, y]) => `${x},${y}`).join(';');
@@ -42,7 +43,22 @@
   Object.freeze(SHAPES);
 
   const emptyBoard = () => Array(SIZE * SIZE).fill(0);
-  const getShape = piece => piece && byId.get(piece.shape);
+  const rotated = new Map();
+  function getShape(piece) {
+    const shape = piece && byId.get(piece.shape);
+    if (!shape) return undefined;
+    const turns = piece.rotation ?? 0;
+    if (!Number.isInteger(turns) || turns < 0 || turns > 3) return undefined;
+    if (!turns) return shape;
+    const key = `${shape.id}:${turns}`;
+    if (!rotated.has(key)) {
+      let cells = shape.cells;
+      for (let i = 0; i < turns; i++) cells = normalize(cells.map(([x, y]) => [-y, x]));
+      rotated.set(key, Object.freeze({...shape, cells: Object.freeze(cells.map(Object.freeze)),
+        width: Math.max(...cells.map(c => c[0])) + 1, height: Math.max(...cells.map(c => c[1])) + 1}));
+    }
+    return rotated.get(key);
+  }
   function fits(board, shape, x, y) {
     if (!shape || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 ||
         x + shape.width > SIZE || y + shape.height > SIZE) return false;
@@ -58,8 +74,8 @@
   function lines(board) {
     const rows = [], columns = [], cells = new Set();
     for (let i = 0; i < SIZE; i++) {
-      if (Array.from({length: SIZE}, (_, x) => board[i * SIZE + x]).every(Boolean)) rows.push(i);
-      if (Array.from({length: SIZE}, (_, y) => board[y * SIZE + i]).every(Boolean)) columns.push(i);
+      if (Array.from({length: SIZE}, (_, x) => board[i * SIZE + x]).every(cell => cell > 0)) rows.push(i);
+      if (Array.from({length: SIZE}, (_, y) => board[y * SIZE + i]).every(cell => cell > 0)) columns.push(i);
     }
     for (const y of rows) for (let x = 0; x < SIZE; x++) cells.add(y * SIZE + x);
     for (const x of columns) for (let y = 0; y < SIZE; y++) cells.add(y * SIZE + x);
@@ -75,10 +91,12 @@
   }
   function hasMove(board, tray) {
     return tray.some(piece => {
-      const shape = getShape(piece);
-      if (!shape) return false;
-      for (let y = 0; y <= SIZE - shape.height; y++) {
-        for (let x = 0; x <= SIZE - shape.width; x++) if (fits(board, shape, x, y)) return true;
+      if (!getShape(piece)) return false;
+      for (let rotation = 0; rotation < 4; rotation++) {
+        const shape = getShape({...piece, rotation});
+        for (let y = 0; y <= SIZE - shape.height; y++) {
+          for (let x = 0; x <= SIZE - shape.width; x++) if (fits(board, shape, x, y)) return true;
+        }
       }
       return false;
     });
@@ -90,14 +108,22 @@
   }
 
   // Construct a legal three-move sequence on a scratch board, then shuffle its
-  // pieces. There is always a solution when dealt, but the player must find one.
+  // pieces. Milestone stones may subsequently block that solution.
+  // If stones leave fewer than three moves, still offer a full tray so the
+  // player can use the remaining space before the game ends.
   // No future move is selected for the player and the real board is untouched.
   function deal(board, random = Math.random) {
     let scratch = board.slice();
     const tray = [];
     for (let i = 0; i < 3; i++) {
       const options = SHAPES.map(shape => ({shape, spots: placements(scratch, shape)})).filter(item => item.spots.length);
-      if (!options.length) return [];
+      if (!options.length) {
+        while (tray.length < 3) {
+          const {shape} = weighted(SHAPES.map(shape => ({shape})), random);
+          tray.push({shape: shape.id, color: 1 + Math.floor(random() * 7)});
+        }
+        break;
+      }
       const {shape, spots} = weighted(options, random);
       const spot = spots[Math.floor(random() * spots.length)];
       tray.push({shape: shape.id, color: 1 + Math.floor(random() * 7)});
@@ -127,6 +153,13 @@
       if (!fits(this.board, shape, x, y)) return null;
       return simulate(this.board, shape, x, y, piece.color);
     }
+    rotate(slot, direction = 1) {
+      const piece = this.tray[slot];
+      if (this.over || !piece || ![1, -1].includes(direction)) return false;
+      const rotation = ((piece.rotation || 0) + direction + 4) % 4;
+      this.tray[slot] = {...piece, rotation};
+      return true;
+    }
     place(slot, x, y) {
       if (this.over) return null;
       const result = this.preview(slot, x, y);
@@ -136,36 +169,50 @@
       else if (++this.misses >= 3) { this.combo = 0; this.misses = 0; }
       const allClear = result.count > 0 && result.board.every(cell => cell === 0);
       const gain = shape.cells.length + 100 * result.count ** 2 * this.combo + (allClear ? 300 : 0);
+      const previousMilestone = Math.floor(this.score / STONE_INTERVAL);
       this.score += gain;
       this.moves++;
       this.totalLines += result.count;
       this.board = result.board;
+      const stones = [];
+      // Resolve the move and its clears first. Each crossed milestone turns
+      // one random non-stone square (empty or occupied) permanently to stone.
+      const candidates = this.board.flatMap((cell, i) => cell === STONE ? [] : [i]);
+      const count = Math.min(candidates.length, Math.floor(this.score / STONE_INTERVAL) - previousMilestone);
+      for (let i = 0; i < count; i++) {
+        const index = Math.floor(this.random() * candidates.length);
+        const [cell] = candidates.splice(index, 1);
+        this.board[cell] = STONE;
+        stones.push(cell);
+      }
       this.tray[slot] = null;
       const refill = this.tray.every(piece => !piece);
       if (refill) this.tray = deal(this.board, this.random);
       this.over = !hasMove(this.board, this.tray);
-      return {...result, gain, allClear, refill, piece, x, y, combo: this.combo};
+      return {...result, gain, allClear, refill, piece, x, y, combo: this.combo, stones};
     }
     serialize() {
-      return {version: 1, board: this.board.slice(), tray: this.tray.map(p => p && {...p}),
+      return {version: 2, board: this.board.slice(), tray: this.tray.map(p => p && {...p}),
         score: this.score, combo: this.combo, misses: this.misses, moves: this.moves, totalLines: this.totalLines};
     }
     restore(data) {
       const integer = (v, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(v) && v >= min && v <= max;
-      if (!data || data.version !== 1 || !Array.isArray(data.board) || data.board.length !== 64 ||
-          !data.board.every(v => integer(v, 0, 7)) || !Array.isArray(data.tray) || data.tray.length !== 3 ||
-          !data.tray.every(p => p === null || (getShape(p) && integer(p.color, 1, 7))) ||
+      if (!data || ![1, 2].includes(data.version) || !Array.isArray(data.board) || data.board.length !== 64 ||
+          !data.board.every(v => integer(v, data.version === 2 ? STONE : 0, 7)) || !Array.isArray(data.tray) || data.tray.length !== 3 ||
+          !data.tray.every(p => p === null || (getShape(p) && integer(p.color, 1, 7) &&
+            (p.rotation === undefined || integer(p.rotation, 0, 3)))) ||
           !['score', 'combo', 'moves', 'totalLines'].every(k => integer(data[k])) ||
           !integer(data.misses, 0, 2) || data.combo > data.moves || data.totalLines > data.moves * 16 ||
           lines(data.board).count || !hasMove(data.board, data.tray)) return false;
       this.board = data.board.slice();
-      this.tray = data.tray.map(p => p && {shape: p.shape, color: p.color});
+      this.tray = data.tray.map(p => p && {shape: p.shape, color: p.color,
+        ...(p.rotation === undefined ? {} : {rotation: p.rotation})});
       for (const k of ['score', 'combo', 'misses', 'moves', 'totalLines']) this[k] = data[k];
       this.over = false;
       return true;
     }
   }
-  const api = {SIZE, SHAPES, Game, emptyBoard, getShape, fits, placements, lines, simulate, hasMove, deal};
+  const api = {SIZE, STONE, STONE_INTERVAL, SHAPES, Game, emptyBoard, getShape, fits, placements, lines, simulate, hasMove, deal};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ByggaEngine = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

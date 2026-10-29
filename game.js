@@ -26,8 +26,10 @@
   let restored = false;
   try { restored = game.restore(JSON.parse(store.get('bygga.save.v1'))); } catch (_) { /* Ignore a corrupt save. */ }
   if (restored) best = Math.max(best, game.score);
-  let playing = false, selected = -1, cursor = null, active = null;
-  let lockedUntil = 0, frame = 0, effect = null, particles = [], pop = null;
+  let playing = false, selected = -1, cursor = null, active = null, keyboardAim = false;
+  const touches = new Map();
+  let twist = null;
+  let lockedUntil = 0, frame = 0, effect = null, particles = [], pop = null, stonePop = null;
   let toastTimer, overTimer;
   let shownScore = game.score, scoreTween = null;
   const format = value => value.toLocaleString('sv-SE');
@@ -71,6 +73,38 @@
     }
     return canvas.getContext('2d');
   }
+  function stone(context, x, y, unit, glow = 0) {
+    context.save();
+    context.translate(x, y);
+    context.scale(unit, unit);
+    // An angular, cracked face stays distinct from the rounded colored blocks.
+    context.beginPath();
+    context.moveTo(.19, .09); context.lineTo(.73, .07); context.lineTo(.91, .23);
+    context.lineTo(.93, .77); context.lineTo(.77, .94); context.lineTo(.21, .92);
+    context.lineTo(.07, .74); context.lineTo(.08, .27); context.closePath();
+    const gradient = context.createLinearGradient(0, 0, 1, 1);
+    gradient.addColorStop(0, '#a2aab3'); gradient.addColorStop(.5, '#747e8b'); gradient.addColorStop(1, '#4e5867');
+    context.fillStyle = gradient; context.fill();
+    context.strokeStyle = '#bac3cc'; context.lineWidth = .025; context.stroke();
+    context.beginPath();
+    context.moveTo(.08, .65); context.lineTo(.23, .79); context.lineTo(.75, .81);
+    context.lineTo(.92, .65); context.lineTo(.93, .77); context.lineTo(.77, .94);
+    context.lineTo(.21, .92); context.lineTo(.07, .74); context.closePath();
+    context.fillStyle = '#35404d'; context.fill();
+    context.beginPath();
+    context.moveTo(.54, .09); context.lineTo(.44, .32); context.lineTo(.59, .46);
+    context.lineTo(.48, .70); context.moveTo(.59, .46); context.lineTo(.77, .39);
+    context.strokeStyle = '#303b49'; context.lineWidth = .035; context.lineJoin = 'round'; context.stroke();
+    context.beginPath(); context.moveTo(.21, .24); context.lineTo(.34, .21);
+    context.moveTo(.66, .65); context.lineTo(.75, .63);
+    context.strokeStyle = '#d3dae16b'; context.lineWidth = .035; context.stroke();
+    if (glow > 0) {
+      context.globalAlpha = glow;
+      roundRect(context, .035, .035, .93, .93, .16);
+      context.strokeStyle = '#e0e6ee'; context.lineWidth = .045; context.stroke();
+    }
+    context.restore();
+  }
   function drawTray() {
     slots.forEach((slot, index) => {
       const piece = game.tray[index], shape = E.getShape(piece);
@@ -82,7 +116,7 @@
       slot.classList.toggle('empty', !piece);
       slot.classList.toggle('selected', index === selected);
       slot.classList.toggle('dragging', active?.slot === index && active.moved);
-      const unavailable = !!shape && !E.placements(game.board, shape).length;
+      const unavailable = !!shape && !E.hasMove(game.board, [piece]);
       slot.classList.toggle('unavailable', unavailable);
       slot.setAttribute('aria-pressed', String(index === selected));
       slot.setAttribute('aria-label', shape ? `Kloss ${index + 1}, ${shape.cells.length} rutor, ${shape.width} bred och ${shape.height} hög${unavailable ? ', får inte plats just nu' : ''}` : `Kloss ${index + 1}, använd`);
@@ -111,7 +145,10 @@
       roundRect(ctx, px + 3, py + 3, UNIT - 6, UNIT - 6, 7);
       ctx.fillStyle = (x + y) % 2 ? '#21324d' : '#22344f'; ctx.fill();
       ctx.strokeStyle = '#90b4de08'; ctx.lineWidth = 1; ctx.stroke();
-      if (game.board[cell]) {
+      if (game.board[cell] === E.STONE) {
+        const glow = stonePop?.cells.includes(cell) ? Math.max(0, 1 - (now - stonePop.start) / 750) : 0;
+        stone(ctx, px, py, UNIT, glow);
+      } else if (game.board[cell]) {
         let scale = 1;
         if (pop && pop.cells.includes(cell)) {
           const t = (now - pop.start) / 190;
@@ -177,7 +214,8 @@
       ctx.restore();
     }
     if (pop && now - pop.start > 190) pop = null;
-    if (effect || particles.length || pop || scoreTween) requestDraw();
+    if (stonePop && now - stonePop.start > 750) stonePop = null;
+    if (effect || particles.length || pop || stonePop || scoreTween) requestDraw();
   }
   function announce(text) { $('#announcement').textContent = text; }
   function refresh() {
@@ -193,7 +231,8 @@
     $('#combo').setAttribute('aria-label', `Kombo ${game.combo}. ${3 - game.misses} drag kvar för att rensa igen.`);
     document.querySelectorAll('.combo-dots i').forEach((dot, i) => dot.classList.toggle('spent', i >= 3 - game.misses));
     const filled = game.board.filter(Boolean).length;
-    board.setAttribute('aria-label', `Spelbräde, 8 gånger 8 rutor. ${filled} upptagna rutor.${cursor ? ` Klossens hörn: rad ${cursor.y + 1}, kolumn ${cursor.x + 1}.` : ''}`);
+    const stones = game.board.filter(cell => cell === E.STONE).length;
+    board.setAttribute('aria-label', `Spelbräde, 8 gånger 8 rutor. ${filled} upptagna rutor.${stones ? ` ${stones} av dem är sten.` : ''}${cursor ? ` Klossens hörn: rad ${cursor.y + 1}, kolumn ${cursor.x + 1}.` : ''}`);
     drawTray(); requestDraw();
   }
   function save() {
@@ -249,6 +288,12 @@
       sound.play('place');
       announce(`Kloss placerad. ${game.score} poäng.`);
     }
+    if (result.stones.length) {
+      if (!reducedMotion.matches) stonePop = {start: now, cells: result.stones};
+      toast(result.stones.length === 1 ? 'En ruta blev sten' : `${result.stones.length} rutor blev sten`, 'Sten blockerar rader och kolumner');
+      const locations = result.stones.map(i => `rad ${Math.floor(i / 8) + 1}, kolumn ${i % 8 + 1}`).join('; ');
+      announce(`${$('#announcement').textContent} Ny sten: ${locations}.`);
+    }
     refresh();
     if (game.over) {
       clearTimeout(overTimer);
@@ -269,6 +314,7 @@
   function select(slot, keyboard = false) {
     if (!canInteract() || !game.tray[slot]) return;
     selected = slot;
+    keyboardAim = keyboard;
     cursor = null;
     if (keyboard) {
       const spots = E.placements(game.board, E.getShape(game.tray[slot]));
@@ -279,15 +325,24 @@
   }
   function cancelPointer(clearSelection = false) {
     const previous = active;
-    active = null;
+    active = null; twist = null; keyboardAim = false; touches.clear();
     if (previous?.element.hasPointerCapture(previous.id)) previous.element.releasePointerCapture(previous.id);
     floating.hidden = true;
     if (clearSelection) selected = -1;
     cursor = null;
     refresh();
   }
-  function movePointer(event) {
+  function rotateSelected(direction = 1) {
+    if (!canInteract() || !game.rotate(selected, direction)) return;
+    const shape = E.getShape(game.tray[selected]);
+    if (cursor) cursor = {x: Math.min(cursor.x, 8 - shape.width), y: Math.min(cursor.y, 8 - shape.height)};
+    if (active?.moved) positionPointer({pointerId: active.id, clientX: active.lastX, clientY: active.lastY});
+    sound.unlock(); sound.play('pick'); save(); refresh();
+    announce(`Kloss ${selected + 1} vriden ${direction === 1 ? 'medurs' : 'moturs'}. ${shape.width} bred och ${shape.height} hög.`);
+  }
+  function positionPointer(event) {
     if (!active || event.pointerId !== active.id) return;
+    active.lastX = event.clientX; active.lastY = event.clientY;
     const g = geometry(), shape = E.getShape(game.tray[active.slot]);
     if (!shape) { cancelPointer(true); return; }
     if (!active.moved && Math.hypot(event.clientX - active.x, event.clientY - active.y) > 6) {
@@ -311,27 +366,70 @@
     floating.style.transform = `translate(${x}px, ${y}px)`;
     floating.hidden = false;
   }
+  function beginTwist(event) {
+    if (event.pointerType !== 'touch') return;
+    touches.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (!active || active.type !== 'touch' || event.pointerId === active.id || twist) return;
+    const a = touches.get(active.id), b = touches.get(event.pointerId);
+    if (!a || Math.hypot(b.x - a.x, b.y - a.y) < 16) return;
+    twist = {second: event.pointerId, angle: Math.atan2(b.y - a.y, b.x - a.x), turn: 0};
+    active.suppressDrop = true;
+  }
+  function movePointer(event) {
+    if (touches.has(event.pointerId)) touches.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (active && twist) {
+      const a = touches.get(active.id), b = touches.get(twist.second);
+      if (a && b && Math.hypot(b.x - a.x, b.y - a.y) >= 16) {
+        const angle = Math.atan2(b.y - a.y, b.x - a.x);
+        twist.turn += Math.atan2(Math.sin(angle - twist.angle), Math.cos(angle - twist.angle));
+        twist.angle = angle;
+        // Snap in quarter turns, with hysteresis so small finger jitter cannot
+        // immediately undo a rotation. Lifting a finger never places a piece.
+        while (Math.abs(twist.turn) >= Math.PI / 3) {
+          const direction = Math.sign(twist.turn);
+          twist.turn -= direction * Math.PI / 2;
+          rotateSelected(direction);
+        }
+      }
+    } else if (active?.suppressDrop && event.pointerId === active.id && active.resume &&
+        Math.hypot(event.clientX - active.resume.x, event.clientY - active.resume.y) > 6) {
+      active.suppressDrop = false;
+    }
+    positionPointer(event);
+  }
   function startPointer(event, slot, fromBoard = false) {
     if (!canInteract() || active || event.button !== 0) return;
     event.preventDefault(); sound.unlock();
+    keyboardAim = false;
     if (!fromBoard) select(slot);
     if (selected < 0) return;
     active = {id: event.pointerId, slot: selected, x: event.clientX, y: event.clientY,
+      lastX: event.clientX, lastY: event.clientY,
       type: event.pointerType, element: event.currentTarget, fromBoard, moved: false};
     event.currentTarget.setPointerCapture(event.pointerId);
     if (fromBoard) movePointer(event);
   }
   function endPointer(event) {
+    touches.delete(event.pointerId);
+    if (twist && (event.pointerId === active?.id || event.pointerId === twist.second)) {
+      twist = null;
+      if (active) active.resume = touches.get(active.id);
+    }
     if (!active || event.pointerId !== active.id) return;
     event.preventDefault();
     sound.unlock();
-    const commit = active.moved || active.fromBoard;
-    if (commit) movePointer(event);
+    const commit = !active.suppressDrop && (active.moved || active.fromBoard);
+    if (commit) positionPointer(event);
     if (commit) place();
     cancelPointer();
   }
   slots.forEach((slot, index) => {
     slot.addEventListener('pointerdown', event => startPointer(event, index));
+    slot.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      if (!canInteract() || active) return;
+      select(index); rotateSelected();
+    });
     slot.addEventListener('click', event => {
       if (event.detail === 0) { sound.unlock(); select(index, true); }
     });
@@ -339,15 +437,20 @@
   board.addEventListener('pointerdown', event => startPointer(event, selected, true));
   board.addEventListener('pointermove', event => {
     if (active || selected < 0 || event.pointerType !== 'mouse' || !canInteract()) return;
+    keyboardAim = false;
     const g = geometry();
     aim(Math.floor((event.clientX - g.x) / g.unit), Math.floor((event.clientY - g.y) / g.unit));
   });
-  board.addEventListener('pointerleave', () => { if (!active) { cursor = null; requestDraw(); } });
+  board.addEventListener('pointerleave', () => { if (!active && !keyboardAim) { cursor = null; requestDraw(); } });
+  document.addEventListener('pointerdown', beginTwist);
   document.addEventListener('pointermove', movePointer);
   document.addEventListener('pointerup', endPointer);
   // Some iOS versions grant audio activation at touchend rather than pointerdown.
   document.addEventListener('touchend', () => { if (playing && !document.hidden) sound.unlock(); }, {passive: true});
-  document.addEventListener('pointercancel', event => { if (active?.id === event.pointerId) cancelPointer(); });
+  document.addEventListener('pointercancel', event => {
+    touches.delete(event.pointerId);
+    if (active?.id === event.pointerId || twist?.second === event.pointerId) cancelPointer();
+  });
   document.addEventListener('lostpointercapture', event => { if (active?.id === event.pointerId) cancelPointer(); });
   document.addEventListener('contextmenu', event => event.preventDefault());
   document.addEventListener('dragstart', event => event.preventDefault());
@@ -359,7 +462,7 @@
     playing = true; restored = false;
     screen.hidden = true;
     document.querySelector('.game').inert = false;
-    particles = []; pop = null; effect = null; lockedUntil = 0;
+    particles = []; pop = null; stonePop = null; effect = null; lockedUntil = 0;
     $('#toast').classList.remove('show');
     sound.unlock(); sound.play('start');
     save(); refresh();
@@ -420,10 +523,14 @@
     if (/^[123]$/.test(event.key)) {
       event.preventDefault(); sound.unlock(); select(Number(event.key) - 1, true); return;
     }
+    if (event.key.toLowerCase() === 'r') {
+      event.preventDefault(); rotateSelected(event.shiftKey ? -1 : 1); return;
+    }
     if (event.key.startsWith('Arrow')) {
       event.preventDefault(); sound.unlock();
       if (selected < 0) select(game.tray.findIndex(Boolean), true);
       if (selected < 0) return;
+      keyboardAim = true;
       const shape = E.getShape(game.tray[selected]);
       const {x, y} = cursor || {x: 0, y: 0};
       aim(Math.max(0, Math.min(8 - shape.width, x + (event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0))),
