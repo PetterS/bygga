@@ -8,6 +8,7 @@
       this.enabled = true;
       this.master = null;
       this.lastTick = 0;
+      this.ownsContext = context === null;
       if (context) this.build();
     }
     build() {
@@ -38,12 +39,23 @@
     }
     unlock() {
       if (!this.enabled) return;
+      if (this.context?.state === 'closed') this.release();
+      // Safari's default ambient session can silence Web Audio independently
+      // of media volume. Select the media playback route during user input.
+      this.sessionType('playback');
       try {
         if (!this.context) {
           const Audio = root.AudioContext || root.webkitAudioContext;
           if (!Audio) return;
           this.context = new Audio({latencyHint: 'interactive'});
           this.build();
+          // Start a source in the same gesture as context creation. This also
+          // primes older WebKit audio paths before the first synthesized note.
+          const prime = this.context.createBufferSource();
+          prime.buffer = this.context.createBuffer(1, 1, this.context.sampleRate);
+          prime.connect(this.context.destination);
+          prime.start();
+          prime.onended = () => prime.disconnect();
         }
         if (this.context.state === 'suspended' || this.context.state === 'interrupted') this.context.resume().catch(() => {});
       } catch (_) { /* Audio is optional, including on restricted devices. */ }
@@ -52,6 +64,25 @@
       this.enabled = enabled;
       if (this.master) this.master.gain.setTargetAtTime(enabled ? 0.55 : 0, this.context.currentTime, 0.015);
       if (enabled) this.unlock();
+      else this.release();
+    }
+    sessionType(type) {
+      if (!this.ownsContext) return;
+      try {
+        if (root.navigator?.audioSession && root.navigator.audioSession.type !== type) root.navigator.audioSession.type = type;
+      } catch (_) { /* An unsupported session policy must not disable audio. */ }
+    }
+    release() {
+      if (!this.ownsContext) return;
+      const previous = this.context;
+      this.context = null;
+      this.master = null;
+      this.wet = null;
+      this.lastTick = 0;
+      if (previous && previous.state !== 'closed') {
+        try { previous.close().catch(() => {}); } catch (_) { /* Already unavailable. */ }
+      }
+      this.sessionType('auto');
     }
     note(frequency, when, duration, volume = 0.2, pan = 0, glass = false) {
       const c = this.context;
@@ -113,7 +144,10 @@
       if (event === 'over') [392, 329.63, 261.63, 196].forEach((f, i) => note(f, i * 0.13, 0.5, 0.12, 0, true));
     }
     suspend() {
-      if (this.context && this.context.state === 'running') this.context.suspend().catch(() => {});
+      // Safari can return a silent context whose state still says 'running'.
+      // Effects have no playback position to preserve, so recreate the graph
+      // on the next gesture instead of trying to reuse that context.
+      this.release();
     }
   }
   root.ByggaSound = Sound;

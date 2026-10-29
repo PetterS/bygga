@@ -324,6 +324,7 @@
   function endPointer(event) {
     if (!active || event.pointerId !== active.id) return;
     event.preventDefault();
+    sound.unlock();
     const commit = active.moved || active.fromBoard;
     if (commit) movePointer(event);
     if (commit) place();
@@ -344,6 +345,8 @@
   board.addEventListener('pointerleave', () => { if (!active) { cursor = null; requestDraw(); } });
   document.addEventListener('pointermove', movePointer);
   document.addEventListener('pointerup', endPointer);
+  // Some iOS versions grant audio activation at touchend rather than pointerdown.
+  document.addEventListener('touchend', () => { if (playing && !document.hidden) sound.unlock(); }, {passive: true});
   document.addEventListener('pointercancel', event => { if (active?.id === event.pointerId) cancelPointer(); });
   document.addEventListener('lostpointercapture', event => { if (active?.id === event.pointerId) cancelPointer(); });
   document.addEventListener('contextmenu', event => event.preventDefault());
@@ -436,7 +439,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { cancelPointer(); if (playing) save(); sound.suspend(); }
   });
-  window.addEventListener('pagehide', () => { if (playing) save(); });
+  window.addEventListener('pagehide', () => { if (playing) save(); sound.suspend(); });
   window.addEventListener('storage', event => {
     if (event.key === 'bygga.best') { best = Math.max(best, validBest(event.newValue)); refresh(); }
   });

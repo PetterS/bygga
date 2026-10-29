@@ -261,6 +261,64 @@ def check_audio(browser):
     print(f"PASS rendered stereo effects, no clipping, mute silence: {stats}", flush=True)
 
 
+def check_audio_lifecycle(browser):
+    page, cdp, errors, _ = open_game(browser, 390, 844, True)
+    # Chromium cannot reproduce iOS routing. Exercise the optional policy API
+    # with a stub, and use real contexts/gestures for the recovery lifecycle.
+    page.evaluate("Object.defineProperty(navigator,'audioSession',{configurable:true,value:{type:'auto'}})")
+    tap(page, cdp, "#play")
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    assert page.evaluate("navigator.audioSession.type") == "playback"
+    before = page.evaluate("Bygga.game.serialize()")
+    page.evaluate("window.oldAudio=Bygga.sound.context")
+    tap(page, cdp, "#sound")
+    page.wait_for_function("oldAudio.state==='closed'")
+    assert page.evaluate("Bygga.sound.context") is None
+    assert page.evaluate("navigator.audioSession.type") == "auto"
+    tap(page, cdp, "#sound")
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    assert page.evaluate("Bygga.sound.context!==oldAudio")
+    assert page.evaluate("navigator.audioSession.type") == "playback"
+    # The same teardown runs on visibilitychange, including a context reporting
+    # 'running'. Reopening alone stays silent; a fresh gesture starts a new graph.
+    page.evaluate("""() => {
+      window.oldAudio=Bygga.sound.context;
+      Object.defineProperty(document,'hidden',{configurable:true,value:true});
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    page.wait_for_function("oldAudio.state==='closed'")
+    assert page.evaluate("Bygga.sound.context") is None
+    assert page.evaluate("Bygga.sound.enabled")
+    assert page.evaluate("navigator.audioSession.type") == "auto"
+    page.evaluate("""() => {
+      Object.defineProperty(document,'hidden',{configurable:true,value:false});
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""")
+    assert page.evaluate("Bygga.sound.context") is None
+    tap(page, cdp, '[data-slot="0"]')
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    assert page.evaluate("Bygga.sound.context!==oldAudio")
+    assert page.evaluate("Bygga.game.serialize()") == before
+    # A context closed externally can recover, too.
+    page.evaluate("async()=>{window.oldAudio=Bygga.sound.context;await oldAudio.close()}")
+    tap(page, cdp, '[data-slot="1"]')
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    assert page.evaluate("Bygga.sound.context!==oldAudio")
+    # Unsupported/throwing policies do not prevent audio creation.
+    tap(page, cdp, "#sound")
+    page.evaluate("Object.defineProperty(navigator,'audioSession',{configurable:true,value:{get type(){return 'auto'},set type(v){throw Error('Unsupported policy')}}})")
+    tap(page, cdp, "#sound")
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    tap(page, cdp, "#sound")
+    page.evaluate("delete navigator.audioSession")
+    tap(page, cdp, "#sound")
+    page.wait_for_function("Bygga.sound.context?.state==='running'")
+    assert page.evaluate("Bygga.game.serialize()") == before
+    assert not errors, errors
+    page.close()
+    print("PASS native-touch audio startup, playback policy, mute/return/closed-context recovery, unsupported API, saved game unchanged", flush=True)
+
+
 def check_mouse(browser):
     page, _, errors, _ = open_game(browser)
     page.locator("#play").click()
@@ -397,6 +455,7 @@ def check_installation(browser):
     import functools
     import http.server
     import json
+    import re
     import shutil
     import tempfile
     import threading
@@ -424,6 +483,8 @@ def check_installation(browser):
         page, cdp, errors, _ = open_game(browser, 768, 1024, True, storage="native", url=url, offline=False)
         try:
             page.wait_for_function("navigator.serviceWorker.controller!==null")
+            page.wait_for_function("navigator.serviceWorker.controller.state==='activated'")
+            initial_caches = page.evaluate("async()=>await caches.keys()")
             manifest = cdp.send("Page.getAppManifest")
             assert not manifest["errors"], manifest
             data = json.loads(manifest["data"])
@@ -444,7 +505,9 @@ def check_installation(browser):
             assert saved["moves"] == 1
             # Deliver a new worker/bundle without discarding the current game.
             sw = served / "sw.js"
-            sw.write_text(sw.read_text().replace("${PREFIX}v1", "${PREFIX}v2"))
+            updated, count = re.subn(r"const CACHE = `\$\{PREFIX\}[^`]+`;", "const CACHE = `${PREFIX}qa-update`;", sw.read_text())
+            assert count == 1
+            sw.write_text(updated)
             with (served / "game.js").open("a") as f:
                 f.write("\nwindow.__pwaUpdate = 2;\n")
             page.evaluate("""async()=>{
@@ -454,8 +517,8 @@ def check_installation(browser):
             }""")
             page.wait_for_function("navigator.serviceWorker.controller.state==='activated'")
             keys = page.evaluate("async()=>await caches.keys()")
-            assert any(k.endswith("-v2") for k in keys) and not any(k.endswith("-v1") for k in keys), keys
-            assert page.evaluate("async()=>{const r=await caches.match(new URL('game.js?v=2',location.href));return (await r.text()).includes('window.__pwaUpdate = 2')}")
+            assert any(k.endswith("-qa-update") for k in keys) and not set(keys).intersection(initial_caches), keys
+            assert page.evaluate("async()=>{const r=await caches.match(document.querySelector('script[src^=\"game.js\"]').src);return (await r.text()).includes('window.__pwaUpdate = 2')}")
             assert page.evaluate("Bygga.game.serialize()") == saved
             page.reload()
             page.wait_for_function("window.__pwaUpdate===2")
@@ -494,10 +557,16 @@ if __name__ == "__main__":
     parser.add_argument("--clear-only", action="store_true")
     parser.add_argument("--playtest", action="store_true")
     parser.add_argument("--pwa-only", action="store_true")
+    parser.add_argument("--audio-only", action="store_true")
     args = parser.parse_args()
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         try:
+            if args.audio_only:
+                check_audio_lifecycle(browser)
+                check_audio(browser)
+                check_touch(browser, 390, 844)
+                raise SystemExit(0)
             if args.pwa_only:
                 check_installation(browser)
                 raise SystemExit(0)
@@ -514,6 +583,7 @@ if __name__ == "__main__":
                 check_touch(browser, 1024, 768)
                 check_touch(browser, 844, 390)
             check_mouse(browser)
+            check_audio_lifecycle(browser)
             check_audio(browser)
         finally:
             for page in TEST_PAGES:
