@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "Bygga",
+  "short_name": "Bygga",
+  "description": "Ett klosspussel. Fyll rader och kolumner och slå ditt rekord.",
+  "lang": "sv",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111c30",
+  "theme_color": "#111c30",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

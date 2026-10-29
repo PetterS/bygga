@@ -6,13 +6,17 @@
   <meta name="theme-color" content="#111c30">
   <meta name="description" content="Bygga – ett klosspussel. Fyll rader och kolumner, skapa kombor och slå ditt rekord.">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Bygga">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Bygga</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <link rel="stylesheet" href="style.css">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css?v=3">
   <script defer src="engine.js"></script>
   <script defer src="sound.js"></script>
   <script defer src="game.js?v=2"></script>
+  <script defer src="install.js"></script>
 </head>
 <body>
   <main class="game" aria-label="Bygga klosspussel">
@@ -63,6 +67,16 @@
     <p>Rensa igen inom tre drag för att bygga en <strong>kombo</strong>. Tre drag utan rensning bryter kombon. Ett helt tomt bräde ger 300 bonuspoäng.</p>
     <div class="help-keys" id="keyboard-help"><span>Välj kloss</span><kbd>1 · 2 · 3</kbd><span>Flytta skuggan</span><kbd>← ↑ ↓ →</kbd><span>Placera</span><kbd>Enter / mellanslag</kbd><span>Avmarkera</span><kbd>Esc</kbd></div>
     <p class="fine-print">Ingen tidspress. Ditt rekord och pågående spel sparas i den här webbläsaren.</p>
+    <details class="install-help" id="install-help">
+      <summary>Lägg till på hemskärmen</summary>
+      <p>På iPad eller iPhone: öppna Bygga i <strong>Safari</strong>.</p>
+      <ol>
+        <li>Tryck på <strong>Dela</strong> <svg class="share-icon" viewBox="0 0 24 24" aria-label="fyrkant med pil uppåt"><path d="M8 9H5v12h14V9h-3M12 15V2m-4 4 4-4 4 4"/></svg> och vid behov <strong>Mer</strong>.</li>
+        <li>Välj <strong>Lägg till på hemskärmen</strong>.</li>
+        <li>Låt <strong>Öppna som webbapp</strong> vara på, om valet visas, och tryck på <strong>Lägg till</strong>.</li>
+      </ol>
+      <p>Starta sedan med Bygga-ikonen. Spelet öppnas i ett eget fönster och fungerar utan internet när det har laddats en gång.</p>
+    </details>
     <button id="help-done" class="primary-button">Jag förstår <span aria-hidden="true">✓</span></button>
   </dialog>
   <dialog id="restart-dialog" aria-labelledby="restart-title">

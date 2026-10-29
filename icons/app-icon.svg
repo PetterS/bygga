@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="mint" x2=".8" y2="1"><stop stop-color="#8ce5dc"/><stop offset="1" stop-color="#46b7b3"/></linearGradient>
+    <linearGradient id="gold" x2=".8" y2="1"><stop stop-color="#ffe59e"/><stop offset="1" stop-color="#f4b858"/></linearGradient>
+  </defs>
+  <path fill="#111c30" d="M0 0h512v512H0z"/>
+  <g fill="#2c7f83" transform="translate(0 7)">
+    <rect x="208" y="152" width="96" height="96" rx="19" fill="#bb813a"/>
+    <rect x="320" y="152" width="96" height="96" rx="19"/>
+    <rect x="96" y="264" width="96" height="96" rx="19"/>
+    <rect x="208" y="264" width="96" height="96" rx="19"/>
+    <rect x="320" y="264" width="96" height="96" rx="19"/>
+  </g>
+  <g fill="url(#mint)" stroke="#c2f9ed" stroke-opacity=".35" stroke-width="2">
+    <rect x="208" y="152" width="96" height="96" rx="19" fill="url(#gold)"/>
+    <rect x="320" y="152" width="96" height="96" rx="19"/>
+    <rect x="96" y="264" width="96" height="96" rx="19"/>
+    <rect x="208" y="264" width="96" height="96" rx="19"/>
+    <rect x="320" y="264" width="96" height="96" rx="19"/>
+  </g>
+</svg>

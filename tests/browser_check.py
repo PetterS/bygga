@@ -7,9 +7,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 URL = (Path(__file__).resolve().parents[1] / "index.html").as_uri()
+TEST_PAGES = []
 
 
-def open_game(browser, width=1366, height=900, touch=False, storage=True):
+def open_game(browser, width=1366, height=900, touch=False, storage=True, url=URL, offline=True):
     context = browser.contexts[0]
     browser_cdp = browser.new_browser_cdp_session()
     with context.expect_page() as created:
@@ -17,6 +18,7 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True):
             "url": "about:blank", "background": True, "newWindow": False,
         })
     page = created.value
+    TEST_PAGES.append(page)
     browser_cdp.detach()
     page.set_viewport_size({"width": width, "height": height})
     cdp = context.new_cdp_session(page)
@@ -27,9 +29,9 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True):
     cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": touch, "maxTouchPoints": 5 if touch else 1})
     cdp.send("Network.enable")
     cdp.send("Network.emulateNetworkConditions", {
-        "offline": True, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
+        "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
     })
-    if storage:
+    if storage is True:
         page.add_init_script("""(() => {
           const values=window.name ? JSON.parse(window.name) : {'bygga.best':'42'};
           Object.defineProperty(window,'localStorage',{value:{
@@ -38,12 +40,12 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True):
             removeItem:key=>{delete values[key];window.name=JSON.stringify(values)}
           }});
         })()""")
-    else:
+    elif storage is False:
         page.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw Error('Storage disabled')}})")
     errors, requests = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda req: requests.append(req.url) if req.url.startswith("http") else None)
-    page.goto(URL)
+    page.goto(url)
     page.wait_for_function("window.Bygga && Bygga.game")
     return page, cdp, errors, requests
 
@@ -391,6 +393,99 @@ def play_runs(browser):
     print(f"PASS actual input playthroughs: {total_moves} placements, {total_lines} cleared lines, canvas verified after every move", flush=True)
 
 
+def check_installation(browser):
+    import functools
+    import http.server
+    import json
+    import shutil
+    import tempfile
+    import threading
+
+    root = Path(__file__).resolve().parents[1]
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def end_headers(self):
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+    with tempfile.TemporaryDirectory(prefix="bygga-pwa-") as directory:
+        served = Path(directory) / "bygga"
+        served.mkdir()
+        for filename in ["index.html", "style.css", "engine.js", "sound.js", "game.js", "install.js", "sw.js", "favicon.svg", "manifest.webmanifest"]:
+            shutil.copy2(root / filename, served / filename)
+        shutil.copytree(root / "icons", served / "icons")
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=directory))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/bygga/"
+        page, cdp, errors, _ = open_game(browser, 768, 1024, True, storage="native", url=url, offline=False)
+        try:
+            page.wait_for_function("navigator.serviceWorker.controller!==null")
+            manifest = cdp.send("Page.getAppManifest")
+            assert not manifest["errors"], manifest
+            data = json.loads(manifest["data"])
+            assert data["display"] == "standalone" and data["name"] == "Bygga" and data["lang"] == "sv", data
+            assert page.locator('link[rel="apple-touch-icon"]').get_attribute("href") == "icons/apple-touch-icon.png"
+            icon = page.evaluate("""async () => {
+              const image=new Image();image.src=document.querySelector('link[rel="apple-touch-icon"]').href;
+              await image.decode();return [image.naturalWidth,image.naturalHeight];
+            }""")
+            assert icon == [180, 180], icon
+            page.locator("#play").click()
+            page.locator("#help").click()
+            page.locator("#install-help summary").click()
+            assert page.locator("#install-help").get_attribute("open") is not None
+            page.locator("#help-done").click()
+            page.keyboard.press("1"); page.keyboard.press("Enter")
+            saved = page.evaluate("Bygga.game.serialize()")
+            assert saved["moves"] == 1
+            # Deliver a new worker/bundle without discarding the current game.
+            sw = served / "sw.js"
+            sw.write_text(sw.read_text().replace("${PREFIX}v1", "${PREFIX}v2"))
+            with (served / "game.js").open("a") as f:
+                f.write("\nwindow.__pwaUpdate = 2;\n")
+            page.evaluate("""async()=>{
+              const r=await navigator.serviceWorker.getRegistration();
+              const changed=new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));
+              await r.update();await changed;
+            }""")
+            page.wait_for_function("navigator.serviceWorker.controller.state==='activated'")
+            keys = page.evaluate("async()=>await caches.keys()")
+            assert any(k.endswith("-v2") for k in keys) and not any(k.endswith("-v1") for k in keys), keys
+            assert page.evaluate("async()=>{const r=await caches.match(new URL('game.js?v=2',location.href));return (await r.text()).includes('window.__pwaUpdate = 2')}")
+            assert page.evaluate("Bygga.game.serialize()") == saved
+            page.reload()
+            page.wait_for_function("window.__pwaUpdate===2")
+            assert page.evaluate("Bygga.game.serialize()") == saved
+            # Stop the server too: workers have their own network context, so a
+            # page-only offline flag is insufficient evidence of offline support.
+            server.shutdown()
+            server.server_close()
+            cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+            cdp.send("Network.emulateNetworkConditions", {
+                "offline": True, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
+            })
+            page.reload()
+            page.wait_for_function("window.__pwaUpdate===2 && window.Bygga")
+            assert page.evaluate("Bygga.game.serialize()") == saved
+            assert page.locator("#play").inner_text().strip() == "Fortsätt"
+            page.locator("#play").click()
+            page.keyboard.press("2"); page.keyboard.press("Enter")
+            assert page.evaluate("Bygga.game.moves") == 2
+            assert not errors, errors
+            print("PASS app manifest/icons, iPad install help, worker update preserves game, offline cold reload/play with server stopped", flush=True)
+        finally:
+            # This origin belongs only to this test, unlike the user's live site.
+            page.evaluate("async()=>{for(const r of await navigator.serviceWorker.getRegistrations())await r.unregister();for(const k of await caches.keys())await caches.delete(k);localStorage.clear()}")
+            page.close()
+            if thread.is_alive():
+                server.shutdown()
+                server.server_close()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -398,20 +493,29 @@ if __name__ == "__main__":
     parser.add_argument("--effects-only", action="store_true")
     parser.add_argument("--clear-only", action="store_true")
     parser.add_argument("--playtest", action="store_true")
+    parser.add_argument("--pwa-only", action="store_true")
     args = parser.parse_args()
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        if args.playtest:
-            play_runs(browser)
-            raise SystemExit(0)
-        check_clear_survives_animation(browser)
-        if args.clear_only:
-            raise SystemExit(0)
-        if not args.effects_only:
-            check_layouts(browser)
-            check_keyboard_saves(browser)
-            check_touch(browser, 390, 844)
-            check_touch(browser, 1024, 768)
-            check_touch(browser, 844, 390)
-        check_mouse(browser)
-        check_audio(browser)
+        try:
+            if args.pwa_only:
+                check_installation(browser)
+                raise SystemExit(0)
+            if args.playtest:
+                play_runs(browser)
+                raise SystemExit(0)
+            check_clear_survives_animation(browser)
+            if args.clear_only:
+                raise SystemExit(0)
+            if not args.effects_only:
+                check_layouts(browser)
+                check_keyboard_saves(browser)
+                check_touch(browser, 390, 844)
+                check_touch(browser, 1024, 768)
+                check_touch(browser, 844, 390)
+            check_mouse(browser)
+            check_audio(browser)
+        finally:
+            for page in TEST_PAGES:
+                if not page.is_closed():
+                    page.close()
