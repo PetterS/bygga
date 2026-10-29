@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111c30">
+  <meta name="description" content="Bygga – ett klosspussel. Fyll rader och kolumner, skapa kombor och slå ditt rekord.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Bygga</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="engine.js"></script>
+  <script defer src="sound.js"></script>
+  <script defer src="game.js"></script>
+</head>
+<body>
+  <main class="game" aria-label="Bygga klosspussel">
+    <section class="hud" aria-label="Poäng">
+      <div class="score-group"><span class="label">POÄNG</span><strong id="score">0</strong></div>
+      <div class="best-group"><span class="label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 7 5 4 4-7 4 7 5-4-2 12H5Z"/></svg> REKORD</span><strong id="best">0</strong></div>
+      <div id="combo" class="combo" hidden><span id="combo-text"></span><span class="combo-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+    </section>
+
+    <div class="board-wrap">
+      <canvas id="board" width="512" height="512" tabindex="0" role="application" aria-label="Spelbräde, 8 gånger 8 rutor" aria-describedby="keyboard-help"></canvas>
+      <div id="points" class="points" aria-hidden="true"></div>
+      <div id="toast" class="toast" aria-hidden="true"><strong></strong><span></span></div>
+    </div>
+
+    <section class="tray" aria-label="Dina tre klossar">
+      <button class="piece-slot" data-slot="0" aria-label="Kloss 1"><canvas width="180" height="150" aria-hidden="true"></canvas><span class="slot-number" aria-hidden="true">1</span></button>
+      <button class="piece-slot" data-slot="1" aria-label="Kloss 2"><canvas width="180" height="150" aria-hidden="true"></canvas><span class="slot-number" aria-hidden="true">2</span></button>
+      <button class="piece-slot" data-slot="2" aria-label="Kloss 3"><canvas width="180" height="150" aria-hidden="true"></canvas><span class="slot-number" aria-hidden="true">3</span></button>
+    </section>
+
+    <nav class="toolbar" aria-label="Spelkontroller">
+      <button id="restart" class="icon-button" aria-label="Nytt spel" title="Nytt spel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 8M4 4v6h6"/></svg></button>
+      <button id="sound" class="icon-button" aria-label="Stäng av ljud" title="Ljud" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 4V5L7 9Z"/><path id="sound-waves" d="M16 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg></button>
+      <button id="help" class="icon-button" aria-label="Så spelar du" title="Så spelar du"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8a3 3 0 1 1 5 2c-2 1-2 2-2 3m0 4v.1"/><circle cx="12" cy="12" r="9"/></svg></button>
+    </nav>
+  </main>
+
+  <canvas id="drag-piece" aria-hidden="true" hidden></canvas>
+  <div id="screen" class="screen">
+    <section class="screen-card" aria-labelledby="screen-title">
+      <div class="brand-shape" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <h1 id="screen-title">Bygga</h1>
+      <p id="screen-copy">Dra in klossarna. Fyll hela<br>rader eller kolumner.</p>
+      <div id="final-stats" class="final-stats" hidden><span>POÄNG<strong id="final-score">0</strong></span><span>REKORD<strong id="final-best">0</strong></span></div>
+      <button id="play" class="primary-button">Spela <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+      <button id="screen-secondary" class="text-button" hidden>Visa brädet</button>
+    </section>
+  </div>
+
+  <dialog id="help-dialog" aria-labelledby="help-title">
+    <button id="close-help" class="close-button" aria-label="Stäng hjälp">×</button>
+    <h2 id="help-title">Så spelar du</h2>
+    <div class="help-example" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <p><strong>Fyll en hel rad eller kolumn</strong> så försvinner den och ger poäng. Flera linjer samtidigt ger extra mycket.</p>
+    <p>Dra en kloss till brädet och släpp när skuggan ligger rätt. Du kan också <strong>trycka på en kloss och sedan på en ruta</strong>. Rutan blir klossens övre vänstra hörn.</p>
+    <p>Använd alla tre klossar för att få tre nya. Klossarna går inte att vrida. Spelet slutar när ingen av de återstående klossarna får plats.</p>
+    <p>Rensa igen inom tre drag för att bygga en <strong>kombo</strong>. Tre drag utan rensning bryter kombon. Ett helt tomt bräde ger 300 bonuspoäng.</p>
+    <div class="help-keys" id="keyboard-help"><span>Välj kloss</span><kbd>1 · 2 · 3</kbd><span>Flytta skuggan</span><kbd>← ↑ ↓ →</kbd><span>Placera</span><kbd>Enter / mellanslag</kbd><span>Avmarkera</span><kbd>Esc</kbd></div>
+    <p class="fine-print">Ingen tidspress. Ditt rekord och pågående spel sparas i den här webbläsaren.</p>
+    <button id="help-done" class="primary-button">Jag förstår <span aria-hidden="true">✓</span></button>
+  </dialog>
+  <dialog id="restart-dialog" aria-labelledby="restart-title">
+    <h2 id="restart-title">Börja om?</h2>
+    <p>Det pågående spelet ersätts. Ditt rekord finns kvar.</p>
+    <button id="confirm-restart" class="primary-button">Nytt spel <span aria-hidden="true">↗</span></button>
+    <button id="cancel-restart" class="text-button">Fortsätt spela</button>
+  </dialog>
+  <p id="announcement" class="sr-only" role="status" aria-live="polite"></p>
+  <noscript>Aktivera JavaScript för att spela Bygga.</noscript>
+</body>
+</html>
