@@ -47,17 +47,20 @@
     const gap = unit * 0.055, inset = (1 - scale) * unit / 2;
     const left = x + gap + inset, top = y + gap + inset;
     const size = (unit - 2 * gap) * scale;
-    if (size < 0.2) return;
+    if (size < 0.2 || alpha <= 0) return;
     context.save();
     context.globalAlpha *= alpha;
-    roundRect(context, left, top + unit * 0.045, size, size, unit * 0.115);
+    // Bevels and highlights must shrink with the tile. A fixed-height bevel
+    // eventually made the disappearing face negative, throwing inside save()
+    // and leaving the canvas transparent for every subsequent frame.
+    roundRect(context, left, top + size * .05, size, size, size * .13);
     context.fillStyle = colors[2]; context.fill();
     const gradient = context.createLinearGradient(left, top, left + size * .7, top + size);
     gradient.addColorStop(0, colors[0]); gradient.addColorStop(1, colors[1]);
-    roundRect(context, left, top, size, size - unit * .035, unit * .11);
+    roundRect(context, left, top, size, size * .96, size * .124);
     context.fillStyle = gradient; context.fill();
-    context.strokeStyle = '#ffffff30'; context.lineWidth = unit * .022; context.stroke();
-    roundRect(context, left + size * .13, top + size * .09, size * .74, unit * .032, unit * .016);
+    context.strokeStyle = '#ffffff30'; context.lineWidth = size * .025; context.stroke();
+    roundRect(context, left + size * .13, top + size * .09, size * .74, size * .036, size * .018);
     context.fillStyle = '#ffffff40'; context.fill();
     context.restore();
   }
@@ -101,6 +104,7 @@
     const rect = board.getBoundingClientRect();
     sizeCanvas(board, rect.width, rect.height);
     ctx.setTransform(board.width / SIDE, 0, 0, board.height / SIDE, 0, 0);
+    ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, SIDE, SIDE);
     for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
       const cell = y * 8 + x, px = PAD + x * UNIT, py = PAD + y * UNIT;

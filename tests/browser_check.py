@@ -289,14 +289,124 @@ def check_mouse(browser):
     print("PASS mouse drag, full crossing preview, input during particles, reduced-motion all-clear", flush=True)
 
 
+def check_clear_survives_animation(browser):
+    page, _, errors, _ = open_game(browser)
+    page.locator("#play").click()
+    fixture(page, "g.tray[0]={shape:'single-0',color:5};for(let i=1;i<8;i++)g.board[i]=2;g.board[63]=4;")
+    page.keyboard.press("1"); page.keyboard.press("Enter")
+    page.wait_for_timeout(1000)
+    pixels = page.evaluate("""() => {
+      const c=document.querySelector('#board'),ctx=c.getContext('2d'),scale=c.width/512;
+      const sample=(x,y)=>Array.from(ctx.getImageData(Math.floor((12+(x+.5)*61)*scale),Math.floor((12+(y+.5)*61)*scale),1,1).data);
+      return {alpha:ctx.globalAlpha,block:sample(7,7),empty:sample(0,0),occupied:Bygga.game.board.filter(Boolean).length};
+    }""")
+    assert not errors, errors
+    assert pixels["alpha"] == 1, pixels
+    assert pixels["occupied"] == 1, pixels
+    assert pixels["block"][3] == 255 and pixels["empty"][3] == 255, pixels
+    assert pixels["block"][2] > pixels["empty"][2] + 60, pixels
+    page.screenshot(path="/tmp/bygga-after-clear.png")
+    page.close()
+    print("PASS surviving block and empty grid remain painted after the complete clear animation", flush=True)
+
+
+def play_runs(browser):
+    """Play from empty boards via actual input; inspect pixels after every move."""
+    page, _, errors, _ = open_game(browser)
+    page.locator("#play").click()
+    total_moves = total_lines = 0
+    for run in range(3):
+        for turn in range(45):
+            move = page.evaluate("""() => {
+              const E=ByggaEngine,g=Bygga.game;
+              if(g.over)return null;
+              let best=null;
+              g.tray.forEach((p,slot)=>{
+                if(!p)return;
+                const shape=E.getShape(p);
+                for(const {x,y} of E.placements(g.board,shape)) {
+                  const r=g.preview(slot,x,y),b=r.board;
+                  let concentration=0,holes=0;
+                  for(let i=0;i<8;i++){
+                    let row=0,col=0;
+                    for(let j=0;j<8;j++){row+=!!b[i*8+j];col+=!!b[j*8+i]}
+                    concentration+=row*row+col*col;
+                  }
+                  for(let i=0;i<64;i++)if(!b[i]){
+                    const neighbors=[];
+                    if(i%8)neighbors.push(i-1);if(i%8<7)neighbors.push(i+1);
+                    if(i>=8)neighbors.push(i-8);if(i<56)neighbors.push(i+8);
+                    if(neighbors.every(n=>b[n]))holes++;
+                  }
+                  const remaining=g.tray.map((piece,i)=>i===slot?null:piece);
+                  const blocked=remaining.filter(p=>p&&!E.placements(b,E.getShape(p)).length).length;
+                  const value=r.count*100+concentration*.2-holes*12-blocked*90+y*.01-x*.01;
+                  if(!best||value>best.value)best={slot,x,y,width:shape.width,height:shape.height,value,clears:r.count,moves:g.moves};
+                }
+              });
+              return best;
+            }""")
+            if not move:
+                break
+            gx, gy, unit = board_geometry(page)
+            r = page.locator(f'[data-slot="{move["slot"]}"]').bounding_box()
+            if run == 1:
+                page.mouse.click(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+                page.mouse.click(gx + (move["x"] + .5) * unit, gy + (move["y"] + .5) * unit)
+            else:
+                page.mouse.move(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+                page.mouse.down()
+                page.mouse.move(gx + (move["x"] + move["width"] / 2) * unit,
+                                gy + (move["y"] + move["height"] / 2) * unit, steps=5)
+                assert page.evaluate("Bygga.cursor") == {"x": move["x"], "y": move["y"]}, {"move": move, "cursor": page.evaluate("Bygga.cursor")}
+                page.mouse.up()
+            assert page.evaluate("Bygga.game.moves") == move["moves"] + 1, {"move": move, "selected": page.evaluate("Bygga.selected")}
+            page.wait_for_timeout(850 if move["clears"] else 210)
+            assert not errors, errors
+            rendered = page.evaluate("""() => {
+              const c=document.querySelector('#board'),ctx=c.getContext('2d'),scale=c.width/512;
+              const invisible=[];
+              Bygga.game.board.forEach((color,i)=>{
+                const pixel=ctx.getImageData(Math.floor((12+(i%8+.5)*61)*scale),Math.floor((12+(Math.floor(i/8)+.5)*61)*scale),1,1).data;
+                if(pixel[3]!==255||(color&&pixel[0]+pixel[1]+pixel[2]<260))invisible.push(i);
+              });
+              return {alpha:ctx.globalAlpha,invisible};
+            }""")
+            assert rendered == {"alpha": 1, "invisible": []}, rendered
+            total_moves += 1
+            total_lines += move["clears"]
+            if (turn + 1) % 15 == 0:
+                print(f"Playing run {run+1}: {turn+1} moves; {total_lines} lines cleared across runs; all pixels intact", flush=True)
+        page.screenshot(path=f"/tmp/bygga-played-run-{run+1}.png")
+        print(f"PASS played run {run+1}: " + str(page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,over:Bygga.game.over})")), flush=True)
+        if run < 2:
+            if page.locator("#screen").is_visible():
+                page.locator("#play").click()
+            else:
+                page.locator("#restart").click()
+                if page.locator("#restart-dialog").is_visible():
+                    page.locator("#confirm-restart").click()
+    assert total_lines >= 10, (total_moves, total_lines)
+    page.close()
+    print(f"PASS actual input playthroughs: {total_moves} placements, {total_lines} cleared lines, canvas verified after every move", flush=True)
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--effects-only", action="store_true")
+    parser.add_argument("--clear-only", action="store_true")
+    parser.add_argument("--playtest", action="store_true")
     args = parser.parse_args()
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        if args.playtest:
+            play_runs(browser)
+            raise SystemExit(0)
+        check_clear_survives_animation(browser)
+        if args.clear_only:
+            raise SystemExit(0)
         if not args.effects_only:
             check_layouts(browser)
             check_keyboard_saves(browser)
