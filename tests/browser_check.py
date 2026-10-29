@@ -4,24 +4,55 @@
 # ///
 """Offline gameplay checks in isolated background tabs of the existing Chrome."""
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+import time
+from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 URL = (Path(__file__).resolve().parents[1] / "index.html").as_uri()
 TEST_PAGES = []
+SCREENSHOTS = True
+BACKGROUND_RENDER = False
+
+
+def capture_screenshot(page, path):
+    if SCREENSHOTS:
+        page.screenshot(path=path)
 
 
 def open_game(browser, width=1366, height=900, touch=False, storage=True, url=URL, offline=True, background_render=False):
     context = browser.contexts[0]
     browser_cdp = browser.new_browser_cdp_session()
-    with context.expect_page() as created:
-        browser_cdp.send("Target.createTarget", {
-            "url": "about:blank", "background": True, "newWindow": False,
-        })
-    page = created.value
+    target = browser_cdp.send("Target.createTarget", {
+        "url": "about:blank", "background": True, "newWindow": False,
+    })["targetId"]
+    # Another suite or the user may open a tab at the same time. Match our
+    # exact target before changing viewport, storage or network settings.
+    page, cdp = None, None
+    deadline = time.monotonic() + 5
+    while page is None and time.monotonic() < deadline:
+        for candidate in context.pages:
+            session = None
+            try:
+                session = context.new_cdp_session(candidate)
+                if session.send("Target.getTargetInfo")["targetInfo"]["targetId"] == target:
+                    page, cdp = candidate, session
+                    break
+                session.detach()
+            except PlaywrightError:
+                if session:
+                    try:
+                        session.detach()
+                    except PlaywrightError:
+                        pass
+        if page is None:
+            browser_cdp.send("Target.getTargetInfo", {"targetId": target})
+            time.sleep(.01)
+    if page is None:
+        browser_cdp.send("Target.closeTarget", {"targetId": target})
+        browser_cdp.detach()
+        raise AssertionError(f"Could not attach to test tab {target}")
     TEST_PAGES.append(page)
     browser_cdp.detach()
     page.set_viewport_size({"width": width, "height": height})
-    cdp = context.new_cdp_session(page)
     cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
     cdp.send("Emulation.setDeviceMetricsOverride", {
         "width": width, "height": height, "deviceScaleFactor": 1, "mobile": touch,
@@ -42,9 +73,9 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True, url=UR
         })()""")
     elif storage is False:
         page.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw Error('Storage disabled')}})")
-    if background_render:
+    if background_render or BACKGROUND_RENDER:
         # A covered desktop window can suspend compositor-driven RAF even
-        # with focus emulation. Only the demo's drawing clock uses timers;
+        # with focus emulation. Only the test tab's drawing clock uses timers;
         # game state continues to change exclusively through normal input.
         page.add_init_script("""(() => {
           window.__nativeFrames={request:requestAnimationFrame,cancel:cancelAnimationFrame};
@@ -59,8 +90,11 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True, url=UR
     return page, cdp, errors, requests
 
 
-def touch_event(cdp, kind, points):
-    cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points})
+def touch_event(cdp, kind, points, timestamp=None):
+    params = {"type": kind, "touchPoints": points}
+    if timestamp is not None:
+        params["timestamp"] = timestamp
+    cdp.send("Input.dispatchTouchEvent", params)
 
 
 def point(x, y, ident=1):
@@ -109,7 +143,7 @@ def check_layouts(browser):
     ]:
         page, cdp, errors, requests = open_game(browser, width, height, touch)
         if (width, height) == (390, 844):
-            page.screenshot(path="/tmp/bygga-title-phone.png")
+            capture_screenshot(page, "/tmp/bygga-title-phone.png")
         page.locator("#play").click()
         fixture(page, "for(const [i,c] of [[56,1],[57,1],[58,1],[59,2],[63,4],[55,4],[47,4],[48,1],[49,1],[50,1],[51,2],[43,2],[35,2],[60,5],[61,5],[53,5],[45,5],[46,4]])g.board[i]=c;")
         measures = page.evaluate("""() => {
@@ -129,7 +163,7 @@ def check_layouts(browser):
             r = button.bounding_box()
             assert r["width"] >= 44 and r["height"] >= 44, r
         assert page.locator("#screen").is_hidden()
-        page.screenshot(path=f"/tmp/bygga-{width}x{height}.png")
+        capture_screenshot(page, f"/tmp/bygga-{width}x{height}.png")
         assert not errors, errors
         assert not requests, requests
         page.close()
@@ -217,7 +251,7 @@ def check_touch(browser, width, height):
     assert page.evaluate("Bygga.cursor") == {"x": 3, "y": 2}
     assert page.locator("#drag-piece").is_visible()
     if width == 390:
-        page.screenshot(path="/tmp/bygga-touch-drag.png")
+        capture_screenshot(page, "/tmp/bygga-touch-drag.png")
     touch_event(cdp, "touchEnd", [])
     assert page.evaluate("Bygga.game.moves") == 1
     assert page.evaluate("Bygga.game.board[19]") == 1
@@ -319,7 +353,7 @@ def check_stones(browser):
       return [...c.getContext('2d').getImageData((12+.3*61)*s,(12+.55*61)*s,1,1).data];
     }""")
     assert pixel[3] == 255 and 70 < pixel[0] < 180 and abs(pixel[0] - pixel[2]) < 45, pixel
-    page.screenshot(path="/tmp/bygga-stones-phone.png")
+    capture_screenshot(page, "/tmp/bygga-stones-phone.png")
     assert not errors, errors
     assert not requests, requests
     page.close()
@@ -366,6 +400,89 @@ def check_rotation_mouse_keyboard(browser):
     print("PASS right-click, R/Shift+R, rotated placement/save/resume, rotation-only fit stays playable", flush=True)
 
 
+def check_rotation_tap(browser, width, height):
+    page, cdp, errors, requests = open_game(browser, width, height, True)
+    tap(page, cdp, "#play")
+    contacts, timestamp = set(), 0
+
+    def send(kind, points, elapsed=.04):
+        nonlocal contacts, timestamp
+        # Covered-window CDP acknowledgements may each take a second. Supply
+        # native event timestamps so a short tap stays short despite transport.
+        timestamp = time.time() if kind == "touchStart" and not contacts else timestamp + elapsed
+        touch_event(cdp, kind, points, timestamp)
+        ids = {p["id"] for p in points}
+        if kind in ("touchStart", "touchMove"):
+            contacts = ids
+        elif kind == "touchCancel" or not points:
+            contacts.clear()
+        else:
+            contacts -= ids
+    r = page.locator('[data-slot="0"]').bounding_box()
+    first = point(r["x"] + r["width"] / 2 - 18, r["y"] + r["height"] / 2)
+    second = point(first["x"] + 36, first["y"], 2)
+    # Both simultaneous contacts and slightly staggered taps work. Either
+    # finger can lift first; a pair must rotate only once and never place.
+    for order in ("together", "first", "second"):
+        fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+        if order == "together":
+            send("touchStart", [first, second])
+        else:
+            send("touchStart", [first])
+            send("touchStart", [first, second])
+        if order != "together":
+            send("touchEnd", [first if order == "first" else second])
+        send("touchEnd", [])
+        assert page.evaluate("Bygga.game.tray[0].rotation") == 1, order
+        assert page.evaluate("Bygga.game.moves") == 0
+        assert page.evaluate("Bygga.game.score") == 0
+        assert page.evaluate("Bygga.selected") == 0
+        assert page.evaluate("Bygga.game.board.every(v=>v===0)")
+        assert page.locator("#drag-piece").is_hidden()
+    saved = page.evaluate("Bygga.game.serialize()")
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.evaluate("Bygga.game.serialize()") == saved
+    tap(page, cdp, "#play")
+    # Small tap jitter is fine; a hold, pan, cancellation or third finger
+    # must not be interpreted as a tap.
+    for gesture in ("jitter", "hold", "pan", "cancel", "third"):
+        fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+        send("touchStart", [first, second])
+        if gesture in ("pan", "jitter"):
+            distance = 22 if gesture == "pan" else 4
+            moved = [point(first["x"] + distance, first["y"] + 2),
+                     point(second["x"] + distance, second["y"] + 2, 2)]
+            send("touchMove", moved)
+            page.wait_for_timeout(40)
+            send("touchMove", [first, second])
+        elif gesture == "third":
+            send("touchStart", [first, second, point(first["x"], first["y"] - 35, 3)])
+        send("touchCancel" if gesture == "cancel" else "touchEnd", [], elapsed=.48 if gesture == "hold" else .04)
+        assert page.evaluate("Bygga.game.tray[0].rotation||0") == (1 if gesture == "jitter" else 0), gesture
+        assert page.evaluate("Bygga.game.moves") == 0, gesture
+    # A second-finger tap during an existing drag must not silently turn it.
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    gx, gy, unit = board_geometry(page)
+    held = point(gx + 3.5 * unit, gy + 3 * unit + 24)
+    added = point(held["x"] + 36, held["y"], 2)
+    send("touchStart", [first])
+    send("touchMove", [held])
+    send("touchStart", [held, added])
+    send("touchEnd", [added])
+    assert page.evaluate("Bygga.game.tray[0].rotation||0") == 0
+    target = point(gx + 4.5 * unit, gy + 3 * unit + 24)
+    send("touchMove", [target])
+    page.wait_for_function("Bygga.cursor?.x===3 && Bygga.cursor?.y===2")
+    send("touchEnd", [])
+    assert page.evaluate("Bygga.game.moves") == 1
+    assert page.evaluate("[19,20,21].map(i=>Bygga.game.board[i])") == [4, 4, 4]
+    assert not errors, errors
+    assert not requests, requests
+    page.close()
+    print(f"PASS native two-finger tap, both release orders, jitter, cancellation, drag safety, save/resume {width}×{height}", flush=True)
+
+
 def check_rotation_touch(browser, width, height):
     page, cdp, errors, _ = open_game(browser, width, height, True)
     tap(page, cdp, "#play")
@@ -383,6 +500,7 @@ def check_rotation_touch(browser, width, height):
     touch_event(cdp, "touchEnd", [])
     assert page.evaluate("Bygga.game.moves") == 0
     assert page.evaluate("Bygga.selected") == 0
+    assert page.evaluate("Bygga.game.tray[0].rotation") == 3, "Twist release must not add a tap rotation"
     # Rotate during a lifted drag, remove the second finger, then continue
     # dragging and release the first finger to place the new orientation.
     fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
@@ -404,7 +522,7 @@ def check_rotation_touch(browser, width, height):
     page.wait_for_function("Bygga.cursor?.x===4 && Bygga.cursor?.y===1")
     assert page.evaluate("Bygga.cursor") == {"x": 4, "y": 1}
     assert page.locator("#drag-piece").is_visible()
-    page.screenshot(path=f"/tmp/bygga-rotation-touch-{width}.png")
+    capture_screenshot(page, f"/tmp/bygga-rotation-touch-{width}.png")
     touch_event(cdp, "touchEnd", [])
     assert page.evaluate("Bygga.game.moves") == 1
     assert page.evaluate("[12,20,28].map(i=>Bygga.game.board[i])") == [4, 4, 4]
@@ -494,7 +612,7 @@ def check_mouse(browser):
     page.mouse.move(gx + unit / 2, gy + unit / 2, steps=12)
     assert page.evaluate("Bygga.cursor") == {"x": 0, "y": 0}
     assert page.evaluate("Bygga.game.preview(Bygga.selected,0,0).count") == 2
-    page.screenshot(path="/tmp/bygga-clear-preview.png")
+    capture_screenshot(page, "/tmp/bygga-clear-preview.png")
     page.mouse.up()
     assert page.evaluate("Bygga.game.score") == 401
     page.wait_for_timeout(130)
@@ -529,7 +647,7 @@ def check_clear_survives_animation(browser):
     assert pixels["occupied"] == 1, pixels
     assert pixels["block"][3] == 255 and pixels["empty"][3] == 255, pixels
     assert pixels["block"][2] > pixels["empty"][2] + 60, pixels
-    page.screenshot(path="/tmp/bygga-after-clear.png")
+    capture_screenshot(page, "/tmp/bygga-after-clear.png")
     page.close()
     print("PASS surviving block and empty grid remain painted after the complete clear animation", flush=True)
 
@@ -672,7 +790,7 @@ def play_runs(browser, demo=False, record_dir=None):
             if (turn + 1) % 15 == 0:
                 print(f"Playing run {run+1}: {state}; all pixels intact", flush=True)
         if not demo:
-            page.screenshot(path=f"/tmp/bygga-played-run-{run+1}.png")
+            capture_screenshot(page, f"/tmp/bygga-played-run-{run+1}.png")
         print(f"PASS played run {run+1}: " + str(page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,over:Bygga.game.over})")), flush=True)
         if run < runs - 1:
             if page.locator("#screen").is_visible():
@@ -811,15 +929,26 @@ if __name__ == "__main__":
     parser.add_argument("--pwa-only", action="store_true")
     parser.add_argument("--audio-only", action="store_true")
     parser.add_argument("--experiments-only", action="store_true")
+    parser.add_argument("--tap-only", action="store_true")
+    parser.add_argument("--no-screenshots", action="store_true", help="Run all assertions without optional window captures")
+    parser.add_argument("--background-render", action="store_true", help="Keep test animations drawing when the browser is covered")
     parser.add_argument("--demo", action="store_true", help="Leave one background playthrough tab for review")
     parser.add_argument("--record-dir", type=Path, help="Capture playthrough frames and move history")
     args = parser.parse_args()
+    SCREENSHOTS = not args.no_screenshots
+    BACKGROUND_RENDER = args.background_render
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         try:
+            if args.tap_only:
+                check_rotation_tap(browser, 390, 844)
+                check_rotation_tap(browser, 1024, 768)
+                raise SystemExit(0)
             if args.experiments_only:
                 check_stones(browser)
                 check_rotation_mouse_keyboard(browser)
+                check_rotation_tap(browser, 390, 844)
+                check_rotation_tap(browser, 1024, 768)
                 check_rotation_touch(browser, 390, 844)
                 check_rotation_touch(browser, 1024, 768)
                 raise SystemExit(0)
@@ -840,6 +969,8 @@ if __name__ == "__main__":
             if not args.effects_only:
                 check_stones(browser)
                 check_rotation_mouse_keyboard(browser)
+                check_rotation_tap(browser, 390, 844)
+                check_rotation_tap(browser, 1024, 768)
                 check_rotation_touch(browser, 390, 844)
                 check_rotation_touch(browser, 1024, 768)
                 check_layouts(browser)

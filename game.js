@@ -369,25 +369,38 @@
   function beginTwist(event) {
     if (event.pointerType !== 'touch') return;
     touches.set(event.pointerId, {x: event.clientX, y: event.clientY});
-    if (!active || active.type !== 'touch' || event.pointerId === active.id || twist) return;
+    if (twist) { twist.tap = false; return; }
+    if (!active || active.type !== 'touch' || event.pointerId === active.id) return;
     const a = touches.get(active.id), b = touches.get(event.pointerId);
-    if (!a || Math.hypot(b.x - a.x, b.y - a.y) < 16) return;
-    twist = {second: event.pointerId, angle: Math.atan2(b.y - a.y, b.x - a.x), turn: 0};
+    if (!a) return;
+    const angle = Math.hypot(b.x - a.x, b.y - a.y) >= 16 ? Math.atan2(b.y - a.y, b.x - a.x) : null;
+    twist = {second: event.pointerId, angle, turn: 0,
+      start: event.timeStamp, origins: [a, b], tap: !active.moved && !active.fromBoard && touches.size === 2};
     active.suppressDrop = true;
   }
-  function movePointer(event) {
+  function trackTouch(event) {
     if (touches.has(event.pointerId)) touches.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (active && twist?.tap) {
+      const points = [touches.get(active.id), touches.get(twist.second)];
+      if (points.some((point, i) => !point || Math.hypot(point.x - twist.origins[i].x, point.y - twist.origins[i].y) > 12)) {
+        twist.tap = false;
+      }
+    }
+  }
+  function movePointer(event) {
+    trackTouch(event);
     if (active && twist) {
       const a = touches.get(active.id), b = touches.get(twist.second);
       if (a && b && Math.hypot(b.x - a.x, b.y - a.y) >= 16) {
         const angle = Math.atan2(b.y - a.y, b.x - a.x);
-        twist.turn += Math.atan2(Math.sin(angle - twist.angle), Math.cos(angle - twist.angle));
+        if (twist.angle !== null) twist.turn += Math.atan2(Math.sin(angle - twist.angle), Math.cos(angle - twist.angle));
         twist.angle = angle;
         // Snap in quarter turns, with hysteresis so small finger jitter cannot
         // immediately undo a rotation. Lifting a finger never places a piece.
         while (Math.abs(twist.turn) >= Math.PI / 3) {
           const direction = Math.sign(twist.turn);
           twist.turn -= direction * Math.PI / 2;
+          twist.tap = false;
           rotateSelected(direction);
         }
       }
@@ -410,11 +423,15 @@
     if (fromBoard) movePointer(event);
   }
   function endPointer(event) {
-    touches.delete(event.pointerId);
+    trackTouch(event);
     if (twist && (event.pointerId === active?.id || event.pointerId === twist.second)) {
+      // A brief, still two-finger tap is the touch equivalent of right-click.
+      // Resolve it on the first release so either release order rotates once.
+      if (twist.tap && event.timeStamp - twist.start <= 400) rotateSelected();
       twist = null;
-      if (active) active.resume = touches.get(active.id);
+      if (active && event.pointerId !== active.id) active.resume = touches.get(active.id);
     }
+    touches.delete(event.pointerId);
     if (!active || event.pointerId !== active.id) return;
     event.preventDefault();
     sound.unlock();
