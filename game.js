@@ -438,9 +438,13 @@
     if (!active || event.pointerId !== active.id) return;
     event.preventDefault();
     sound.unlock();
+    // Decide on release: a stationary tray press rotates, while a drag keeps
+    // its orientation. Include the final position even if no move event ran.
+    positionPointer(event);
+    if (!active) return;
     const commit = !active.suppressDrop && (active.moved || active.fromBoard);
-    if (commit) positionPointer(event);
     if (commit) place();
+    else if (!active.suppressDrop) rotateSelected();
     cancelPointer();
   }
   slots.forEach((slot, index) => {
@@ -451,7 +455,7 @@
       select(index); rotateSelected();
     });
     slot.addEventListener('click', event => {
-      if (event.detail === 0) { sound.unlock(); select(index, true); }
+      if (event.detail === 0) { sound.unlock(); select(index, true); rotateSelected(); }
     });
   });
   board.addEventListener('pointerdown', event => startPointer(event, selected, true));

@@ -1,10 +1,10 @@
 'use strict';
 
 const PREFIX = `bygga-${new URL(self.registration.scope).pathname}-`;
-const CACHE = `${PREFIX}v5`;
+const CACHE = `${PREFIX}v6`;
 const FILES = [
   './', './index.html', './style.css?v=3', './engine.js?v=3', './sound.js?v=2',
-  './game.js?v=6', './install.js', './favicon.svg', './manifest.webmanifest',
+  './game.js?v=7', './install.js', './favicon.svg', './manifest.webmanifest',
   './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png',
 ];
 const allowedPaths = new Set(FILES.map(file => new URL(file, self.registration.scope).pathname));

@@ -315,7 +315,7 @@ def check_touch(browser, width, height):
     touch_event(cdp, "touchStart", [point(gx + .5 * unit, gy + .5 * unit)])
     touch_event(cdp, "touchEnd", [])
     assert page.evaluate("Bygga.game.moves") == 1
-    assert page.evaluate("Bygga.game.board.slice(0,3)") == [2, 2, 2]
+    assert page.evaluate("[0,8,16].map(i=>Bygga.game.board[i])") == [2, 2, 2]
     # Invalid overlap and an off-board release leave the tray and score untouched.
     tap(page, cdp, '[data-slot="0"]')
     touch_event(cdp, "touchStart", [point(gx + .5 * unit, gy + .5 * unit)])
@@ -363,7 +363,7 @@ def check_audio(browser):
 def check_stones(browser):
     page, cdp, errors, requests = open_game(browser, 390, 844, True)
     tap(page, cdp, "#play")
-    fixture(page, "g.score=4999;g.random=()=>.999;g.tray[0]={shape:'single-0',color:5};")
+    fixture(page, "g.score=4999;g.random=()=>.999;g.tray[0]={shape:'single-0',color:5};g.tray[1]={shape:'line3-1',color:2};")
     gx, gy, unit = board_geometry(page)
     tap(page, cdp, '[data-slot="0"]')
     touch_event(cdp, "touchStart", [point(gx + .5 * unit, gy + .5 * unit)])
@@ -379,6 +379,7 @@ def check_stones(browser):
     tap(page, cdp, "#play")
     # A native tap cannot place a three-cell line across the stone at (7,7).
     tap(page, cdp, '[data-slot="1"]')
+    state = page.evaluate("Bygga.game.serialize()")
     touch_event(cdp, "touchStart", [point(gx + 5.5 * unit, gy + 7.5 * unit)])
     assert page.evaluate("Bygga.game.preview(1,5,7)") is None
     touch_event(cdp, "touchEnd", [])
@@ -437,6 +438,99 @@ def check_limited_help(browser):
     assert not requests, requests
     page.close()
     print("PASS native-touch two-row trap ends, stones use empty squares, refill offers an opening after stone placement", flush=True)
+
+
+def check_single_tap_rotation(browser, width, height, touch):
+    page, cdp, errors, requests = open_game(browser, width, height, touch)
+    page.locator("#play").click()
+    rect = page.locator('[data-slot="0"]').bounding_box()
+    origin = point(rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)
+    gx, gy, unit = board_geometry(page)
+
+    def down(p):
+        if touch:
+            touch_event(cdp, "touchStart", [p])
+        else:
+            page.mouse.move(p["x"], p["y"])
+            page.mouse.down()
+
+    def move(p):
+        if touch:
+            touch_event(cdp, "touchMove", [p])
+        else:
+            page.mouse.move(p["x"], p["y"])
+
+    def up():
+        if touch:
+            touch_event(cdp, "touchEnd", [])
+        else:
+            page.mouse.up()
+
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    # Each stationary press turns exactly once, on release; four restore it.
+    for rotation in range(4):
+        down(origin)
+        assert page.evaluate("Bygga.game.tray[0].rotation||0") == rotation
+        move(point(origin["x"] + 3, origin["y"] + 2))
+        up()
+        assert page.evaluate("Bygga.game.tray[0].rotation||0") == (rotation + 1) % 4
+        assert page.evaluate("Bygga.game.moves") == 0
+        assert page.evaluate("Bygga.selected") == 0
+        assert page.locator("#drag-piece").is_hidden()
+    # Blur/cancel and an out-and-back drag cannot accidentally count as taps.
+    before = page.evaluate("Bygga.game.serialize()")
+    down(origin)
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    up()
+    assert page.evaluate("Bygga.game.serialize()") == before
+    if touch:
+        down(origin)
+        touch_event(cdp, "touchCancel", [])
+        assert page.evaluate("Bygga.game.serialize()") == before
+    down(origin)
+    move(point(origin["x"] + 25, origin["y"]))
+    move(origin)
+    up()
+    assert page.evaluate("Bygga.game.serialize()") == before
+    # Direct drags preserve orientation; a prior tap intentionally turns it.
+    for rotated in (False, True):
+        fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+        if rotated:
+            down(origin); up()
+        w, h = (1, 3) if rotated else (3, 1)
+        down(origin)
+        move(point(gx + (2 + w / 2) * unit,
+                   gy + (1 + h if touch else 1 + h / 2) * unit + (24 if touch else 0)))
+        assert page.evaluate("Bygga.game.tray[0].rotation||0") == int(rotated)
+        assert page.evaluate("Bygga.cursor") == {"x": 2, "y": 1}
+        up()
+        cells = [10, 18, 26] if rotated else [10, 11, 12]
+        assert page.evaluate("cells=>cells.map(i=>Bygga.game.board[i])", cells) == [4, 4, 4]
+        assert page.evaluate("Bygga.game.moves") == 1
+    fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+    down(origin); up()
+    saved = page.evaluate("Bygga.game.serialize()")
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.evaluate("Bygga.game.serialize()") == saved
+    assert page.locator("#best").inner_text() == "42"
+    page.locator("#play").click()
+    # A tray tap selects as well as rotates; the following board tap only places.
+    down(origin); up()
+    down(point(gx + 2.5 * unit, gy + 1.5 * unit)); up()
+    assert page.evaluate("[10,11,12].map(i=>Bygga.game.board[i])") == [4, 4, 4]
+    if not touch:
+        fixture(page, "g.tray[0]={shape:'line3-0',color:4};")
+        page.keyboard.press("1")
+        assert page.evaluate("Bygga.game.tray[0].rotation||0") == 0
+        page.locator('[data-slot="0"]').focus()
+        page.keyboard.press("Space")
+        assert page.evaluate("Bygga.game.tray[0].rotation") == 1
+        assert page.evaluate("Bygga.game.moves") == 0
+    assert not errors, errors
+    assert not requests, requests
+    page.close()
+    print(f"PASS single {'tap' if touch else 'click'} rotation, jitter, cancel, drag safety, tap-place, save/record {width}×{height}", flush=True)
 
 
 def check_rotation_mouse_keyboard(browser):
@@ -657,12 +751,14 @@ def check_audio_lifecycle(browser):
     }""")
     assert page.evaluate("Bygga.sound.context") is None
     tap(page, cdp, '[data-slot="0"]')
+    before["tray"][0]["rotation"] = ((before["tray"][0].get("rotation", 0) + 1) % 4)
     page.wait_for_function("Bygga.sound.context?.state==='running'")
     assert page.evaluate("Bygga.sound.context!==oldAudio")
     assert page.evaluate("Bygga.game.serialize()") == before
     # A context closed externally can recover, too.
     page.evaluate("async()=>{window.oldAudio=Bygga.sound.context;await oldAudio.close()}")
     tap(page, cdp, '[data-slot="1"]')
+    before["tray"][1]["rotation"] = ((before["tray"][1].get("rotation", 0) + 1) % 4)
     page.wait_for_function("Bygga.sound.context?.state==='running'")
     assert page.evaluate("Bygga.sound.context!==oldAudio")
     # Unsupported/throwing policies do not prevent audio creation.
@@ -828,7 +924,11 @@ def play_runs(browser, demo=False, record_dir=None):
                 break
             gx, gy, unit = board_geometry(page)
             r = page.locator(f'[data-slot="{move["slot"]}"]').bounding_box()
-            for _ in range(move["turns"]):
+            click_to_place = not demo and run == 1
+            if click_to_place:
+                page.mouse.click(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+            turns = (move["turns"] - int(click_to_place)) % 4
+            for _ in range(turns):
                 page.locator(f'[data-slot="{move["slot"]}"]').click(button="right")
             assert page.evaluate("slot=>Bygga.game.tray[slot].rotation||0", move["slot"]) == move["rotation"], {"move": move, "tray": page.evaluate("Bygga.game.tray")}
             capture()
@@ -841,7 +941,6 @@ def play_runs(browser, demo=False, record_dir=None):
                 capture()
                 page.keyboard.press("Enter")
             elif run == 1:
-                page.mouse.click(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
                 page.mouse.click(gx + (move["x"] + .5) * unit, gy + (move["y"] + .5) * unit)
             else:
                 page.mouse.move(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
@@ -1051,10 +1150,16 @@ if __name__ == "__main__":
         browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         try:
             if args.tap_only:
+                check_single_tap_rotation(browser, 1366, 900, False)
+                check_single_tap_rotation(browser, 390, 844, True)
+                check_single_tap_rotation(browser, 1024, 768, True)
                 check_rotation_tap(browser, 390, 844)
                 check_rotation_tap(browser, 1024, 768)
                 raise SystemExit(0)
             if args.experiments_only:
+                check_single_tap_rotation(browser, 1366, 900, False)
+                check_single_tap_rotation(browser, 390, 844, True)
+                check_single_tap_rotation(browser, 1024, 768, True)
                 check_stones(browser)
                 check_limited_help(browser)
                 check_rules_storage(browser)
@@ -1079,6 +1184,9 @@ if __name__ == "__main__":
             if args.clear_only:
                 raise SystemExit(0)
             if not args.effects_only:
+                check_single_tap_rotation(browser, 1366, 900, False)
+                check_single_tap_rotation(browser, 390, 844, True)
+                check_single_tap_rotation(browser, 1024, 768, True)
                 check_stones(browser)
                 check_limited_help(browser)
                 check_rules_storage(browser)
