@@ -64,7 +64,7 @@ def open_game(browser, width=1366, height=900, touch=False, storage=True, url=UR
     })
     if storage is True:
         page.add_init_script("""(() => {
-          const values=window.name ? JSON.parse(window.name) : {'bygga.best':'42'};
+          const values=window.name ? JSON.parse(window.name) : {'bygga.rules2.best':'42'};
           Object.defineProperty(window,'localStorage',{value:{
             getItem:key=>values[key]??null,
             setItem:(key,value)=>{values[key]=String(value);window.name=JSON.stringify(values)},
@@ -193,8 +193,8 @@ def check_keyboard_saves(browser):
     page.wait_for_function("document.querySelector('#score').textContent==='401'")
     assert page.locator("#best").inner_text() == "401"
     assert page.evaluate("Bygga.game.totalLines") == 2
-    assert page.evaluate("localStorage.getItem('bygga.best')") == "401"
-    assert page.evaluate("JSON.parse(localStorage.getItem('bygga.save.v1')).score") == 401
+    assert page.evaluate("localStorage.getItem(`bygga.rules${ByggaEngine.RULES_VERSION}.best`)") == "401"
+    assert page.evaluate("JSON.parse(localStorage.getItem(`bygga.rules${ByggaEngine.RULES_VERSION}.save`)).score") == 401
     assert page.locator("#points").inner_text() == "+401"
     assert page.locator("#combo-text").inner_text() == "Kombo ×1"
     assert page.evaluate("Bygga.sound.context.state") == "running"
@@ -226,7 +226,7 @@ def check_keyboard_saves(browser):
     page.keyboard.press("1"); page.keyboard.press("Enter")
     page.wait_for_function("!document.querySelector('#screen').hidden")
     assert page.locator("#screen-title").inner_text() == "Slut på plats"
-    assert page.evaluate("localStorage.getItem('bygga.save.v1')") is None
+    assert page.evaluate("localStorage.getItem(`bygga.rules${ByggaEngine.RULES_VERSION}.save`)") is None
     page.locator("#screen-secondary").click()
     assert page.locator("#screen").is_hidden()
     page.locator("#restart").click()
@@ -236,6 +236,49 @@ def check_keyboard_saves(browser):
     assert not requests, requests
     page.close()
     print("PASS keyboard, cross clear, effects, sound unlock/mute, reload/resume, best, help, restart, end/replay", flush=True)
+
+
+def check_rules_storage(browser):
+    page, _, errors, requests = open_game(browser)
+    page.evaluate("""() => {
+      const version=ByggaEngine.RULES_VERSION;
+      const old={...Bygga.game.serialize(),score:70000,moves:400};
+      localStorage.removeItem(`bygga.rules${version}.best`);
+      for(const prefix of ['bygga',`bygga.rules${version-1}`]) {
+        localStorage.setItem(`${prefix}.best`,'70000');
+        localStorage.setItem(prefix==='bygga'?'bygga.save.v1':`${prefix}.save`,JSON.stringify(old));
+      }
+      localStorage.setItem('bygga.sound','off');
+    }""")
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.locator("#best").inner_text() == "0"
+    assert page.locator("#play").inner_text().strip() == "Spela"
+    assert page.evaluate("Bygga.game.score") == 0
+    assert page.locator("#sound").get_attribute("aria-pressed") == "false"
+    # A still-open old release must not import its record through storage events.
+    page.evaluate("""() => {
+      for(const key of ['bygga.best',`bygga.rules${ByggaEngine.RULES_VERSION-1}.best`])
+        window.dispatchEvent(new StorageEvent('storage',{key,newValue:'80000'}));
+    }""")
+    assert page.locator("#best").inner_text() == "0"
+    page.locator("#play").click()
+    fixture(page, "g.tray[0]={shape:'single-0',color:1}")
+    page.keyboard.press("1"); page.keyboard.press("Enter")
+    saved = page.evaluate("Bygga.game.serialize()")
+    assert saved["score"] == 1
+    page.reload()
+    page.wait_for_function("window.Bygga")
+    assert page.evaluate("Bygga.game.serialize()") == saved
+    assert page.locator("#best").inner_text() == "1"
+    assert page.locator("#play").inner_text().strip() == "Fortsätt"
+    assert page.evaluate("localStorage.getItem('bygga.best')") == "70000"
+    page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:`bygga.rules${ByggaEngine.RULES_VERSION}.best`,newValue:'50'}))")
+    assert page.locator("#best").inner_text() == "50"
+    assert not errors, errors
+    assert not requests, requests
+    page.close()
+    print("PASS scoring-version reset, old saved run excluded, stale-tab record ignored, current save/record resume, sound preserved", flush=True)
 
 
 def check_touch(browser, width, height):
@@ -358,6 +401,42 @@ def check_stones(browser):
     assert not requests, requests
     page.close()
     print("PASS milestone stone, native-touch collision, blocked clear preview, rendering, save/resume offline", flush=True)
+
+
+def check_limited_help(browser):
+    page, cdp, errors, requests = open_game(browser, 390, 844, True)
+    tap(page, cdp, "#play")
+    fixture(page, """
+      g.board=Array.from({length:64},(_,i)=>{
+        const x=i%8,y=Math.floor(i/8);
+        return y===0||y===7?0:(x+y)%3===0?ByggaEngine.STONE:1;
+      });
+      const rolls=[0,0,.95,0,.25,0,.999,.999];
+      g.tray=ByggaEngine.deal(g.board,()=>rolls.shift());
+    """)
+    assert page.evaluate("Bygga.game.tray.map(p=>ByggaEngine.hasMove(Bygga.game.board,[p]))") == [True, False, False]
+    gx, gy, unit = board_geometry(page)
+    tap(page, cdp, '[data-slot="0"]')
+    touch_event(cdp, "touchStart", [point(gx + .5 * unit, gy + .5 * unit)])
+    touch_event(cdp, "touchEnd", [])
+    page.wait_for_function("!document.querySelector('#screen').hidden")
+    assert page.evaluate("Bygga.game.moves") == 1
+    assert page.evaluate("Bygga.game.over")
+    assert page.locator("#screen-title").inner_text() == "Slut på plats"
+    tap(page, cdp, "#play")
+    fixture(page, """
+      g.score=4999;g.random=()=>0;g.board[0]=3;
+      g.tray=[{shape:'single-0',color:5},null,null];
+    """)
+    tap(page, cdp, '[data-slot="0"]')
+    touch_event(cdp, "touchStart", [point(gx + 1.5 * unit, gy + .5 * unit)])
+    touch_event(cdp, "touchEnd", [])
+    assert page.evaluate("Bygga.game.board.slice(0,3)") == [3, 5, -1]
+    assert page.evaluate("Bygga.game.tray.every(Boolean)&&ByggaEngine.hasMove(Bygga.game.board,Bygga.game.tray)")
+    assert not errors, errors
+    assert not requests, requests
+    page.close()
+    print("PASS native-touch two-row trap ends, stones use empty squares, refill offers an opening after stone placement", flush=True)
 
 
 def check_rotation_mouse_keyboard(browser):
@@ -658,6 +737,11 @@ def play_runs(browser, demo=False, record_dir=None):
     import json
 
     page, _, errors, _ = open_game(browser, 768 if demo else 1366, 900, background_render=demo)
+    page.evaluate("""() => {
+      let seed=20261030;
+      Bygga.game.random=()=>((seed=(Math.imul(seed,1664525)+1013904223)>>>0)/4294967296);
+      Bygga.game.reset();Bygga.refresh();
+    }""")
     page.locator("#play").click()
     if demo:
         page.locator("#sound").click()
@@ -701,7 +785,7 @@ def play_runs(browser, demo=False, record_dir=None):
     total_moves = total_lines = 0
     runs = 1 if demo else 3
     for run in range(runs):
-        for turn in range(180 if demo else 45):
+        for turn in range(180):
             move = page.evaluate("""() => {
               const E=ByggaEngine,g=Bygga.game;
               if(g.over)return null;
@@ -791,7 +875,7 @@ def play_runs(browser, demo=False, record_dir=None):
                 print(f"Playing run {run+1}: {state}; all pixels intact", flush=True)
         if not demo:
             capture_screenshot(page, f"/tmp/bygga-played-run-{run+1}.png")
-        print(f"PASS played run {run+1}: " + str(page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,over:Bygga.game.over})")), flush=True)
+        print(f"PASS played run {run+1}: " + str(page.evaluate("({moves:Bygga.game.moves,lines:Bygga.game.totalLines,score:Bygga.game.score,stones:Bygga.game.board.filter(v=>v===ByggaEngine.STONE).length,over:Bygga.game.over})")), flush=True)
         if run < runs - 1:
             if page.locator("#screen").is_visible():
                 page.locator("#play").click()
@@ -893,6 +977,32 @@ def check_installation(browser):
             page.reload()
             page.wait_for_function("window.__pwaUpdate===2")
             assert page.evaluate("Bygga.game.serialize()") == saved
+            assert page.locator("#best").inner_text().replace("\u00a0", "").replace(" ", "") == str(saved["score"])
+            # A scoring-rule upgrade starts fresh, unlike the routine update above.
+            old_rules = page.evaluate("ByggaEngine.RULES_VERSION")
+            page.evaluate("localStorage.setItem('bygga.sound','off')")
+            engine = served / "engine.js"
+            updated, count = re.subn(r"const RULES_VERSION = \d+;", f"const RULES_VERSION = {old_rules + 1};", engine.read_text())
+            assert count == 1
+            engine.write_text(updated)
+            sw.write_text(sw.read_text().replace("${PREFIX}qa-update", "${PREFIX}qa-rules-update"))
+            page.evaluate("""async()=>{
+              const r=await navigator.serviceWorker.getRegistration();
+              const changed=new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));
+              await r.update();await changed;
+            }""")
+            page.wait_for_function("navigator.serviceWorker.controller.state==='activated'")
+            page.reload()
+            page.wait_for_function("version=>window.Bygga&&ByggaEngine.RULES_VERSION===version", arg=old_rules + 1)
+            assert page.locator("#best").inner_text() == "0"
+            assert page.locator("#play").inner_text().strip() == "Spela"
+            assert page.locator("#sound").get_attribute("aria-pressed") == "false"
+            assert page.evaluate("Bygga.game.score") == 0
+            page.locator("#play").click()
+            fixture(page)
+            page.keyboard.press("1"); page.keyboard.press("Enter")
+            saved = page.evaluate("Bygga.game.serialize()")
+            assert saved["score"] == 4
             # Stop the server too: workers have their own network context, so a
             # page-only offline flag is insufficient evidence of offline support.
             server.shutdown()
@@ -909,7 +1019,7 @@ def check_installation(browser):
             page.keyboard.press("2"); page.keyboard.press("Enter")
             assert page.evaluate("Bygga.game.moves") == 2
             assert not errors, errors
-            print("PASS app manifest/icons, iPad install help, worker update preserves game, offline cold reload/play with server stopped", flush=True)
+            print("PASS app manifest/icons, iPad install help, routine update preserves record/run, major rules update resets both, offline resume/play with server stopped", flush=True)
         finally:
             # This origin belongs only to this test, unlike the user's live site.
             page.evaluate("async()=>{for(const r of await navigator.serviceWorker.getRegistrations())await r.unregister();for(const k of await caches.keys())await caches.delete(k);localStorage.clear()}")
@@ -946,6 +1056,8 @@ if __name__ == "__main__":
                 raise SystemExit(0)
             if args.experiments_only:
                 check_stones(browser)
+                check_limited_help(browser)
+                check_rules_storage(browser)
                 check_rotation_mouse_keyboard(browser)
                 check_rotation_tap(browser, 390, 844)
                 check_rotation_tap(browser, 1024, 768)
@@ -968,6 +1080,8 @@ if __name__ == "__main__":
                 raise SystemExit(0)
             if not args.effects_only:
                 check_stones(browser)
+                check_limited_help(browser)
+                check_rules_storage(browser)
                 check_rotation_mouse_keyboard(browser)
                 check_rotation_tap(browser, 390, 844)
                 check_rotation_tap(browser, 1024, 768)

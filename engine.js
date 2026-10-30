@@ -2,6 +2,9 @@
   'use strict';
 
   const SIZE = 8;
+  // Bump only when rule/scoring changes make old records incomparable.
+  // Storage schema and service-worker cache versions are independent.
+  const RULES_VERSION = 2;
   const STONE = -1, STONE_INTERVAL = 5000;
   const SHAPES = [];
   const byId = new Map();
@@ -107,27 +110,16 @@
     return items[items.length - 1];
   }
 
-  // Construct a legal three-move sequence on a scratch board, then shuffle its
-  // pieces. Milestone stones may subsequently block that solution.
-  // If stones leave fewer than three moves, still offer a full tray so the
-  // player can use the remaining space before the game ends.
-  // No future move is selected for the player and the real board is untouched.
+  // Give one opening move on the current board, plus two unrestricted pieces.
+  // Shuffle so the helpful piece has no fixed slot. A full-tray solution is
+  // deliberately not guaranteed; preserving room for other shapes matters.
   function deal(board, random = Math.random) {
-    let scratch = board.slice();
+    const all = SHAPES.map(shape => ({shape}));
+    const fitting = all.filter(({shape}) => placements(board, shape).length);
     const tray = [];
     for (let i = 0; i < 3; i++) {
-      const options = SHAPES.map(shape => ({shape, spots: placements(scratch, shape)})).filter(item => item.spots.length);
-      if (!options.length) {
-        while (tray.length < 3) {
-          const {shape} = weighted(SHAPES.map(shape => ({shape})), random);
-          tray.push({shape: shape.id, color: 1 + Math.floor(random() * 7)});
-        }
-        break;
-      }
-      const {shape, spots} = weighted(options, random);
-      const spot = spots[Math.floor(random() * spots.length)];
+      const {shape} = weighted(i === 0 && fitting.length ? fitting : all, random);
       tray.push({shape: shape.id, color: 1 + Math.floor(random() * 7)});
-      scratch = simulate(scratch, shape, spot.x, spot.y).board;
     }
     for (let i = tray.length - 1; i > 0; i--) {
       const j = Math.floor(random() * (i + 1));
@@ -176,8 +168,8 @@
       this.board = result.board;
       const stones = [];
       // Resolve the move and its clears first. Each crossed milestone turns
-      // one random non-stone square (empty or occupied) permanently to stone.
-      const candidates = this.board.flatMap((cell, i) => cell === STONE ? [] : [i]);
+      // one random empty square permanently to stone, while space remains.
+      const candidates = this.board.flatMap((cell, i) => cell === 0 ? [i] : []);
       const count = Math.min(candidates.length, Math.floor(this.score / STONE_INTERVAL) - previousMilestone);
       for (let i = 0; i < count; i++) {
         const index = Math.floor(this.random() * candidates.length);
@@ -212,7 +204,7 @@
       return true;
     }
   }
-  const api = {SIZE, STONE, STONE_INTERVAL, SHAPES, Game, emptyBoard, getShape, fits, placements, lines, simulate, hasMove, deal};
+  const api = {SIZE, RULES_VERSION, STONE, STONE_INTERVAL, SHAPES, Game, emptyBoard, getShape, fits, placements, lines, simulate, hasMove, deal};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ByggaEngine = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

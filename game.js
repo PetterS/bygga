@@ -1,6 +1,9 @@
 (function () {
   'use strict';
   const E = window.ByggaEngine;
+  // Separate namespaces also keep older open tabs from restoring old records.
+  const BEST_KEY = `bygga.rules${E.RULES_VERSION}.best`;
+  const SAVE_KEY = `bygga.rules${E.RULES_VERSION}.save`;
   const $ = selector => document.querySelector(selector);
   const board = $('#board'), ctx = board.getContext('2d');
   const slots = [...document.querySelectorAll('.piece-slot')];
@@ -19,12 +22,12 @@
     remove(key) { try { localStorage.removeItem(key); } catch (_) { /* Play without storage. */ } },
   };
   const validBest = value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0;
-  let best = validBest(store.get('bygga.best'));
+  let best = validBest(store.get(BEST_KEY));
   const game = new E.Game();
   const sound = new window.ByggaSound();
   sound.enabled = store.get('bygga.sound') !== 'off';
   let restored = false;
-  try { restored = game.restore(JSON.parse(store.get('bygga.save.v1'))); } catch (_) { /* Ignore a corrupt save. */ }
+  try { restored = game.restore(JSON.parse(store.get(SAVE_KEY))); } catch (_) { /* Ignore a corrupt save. */ }
   if (restored) best = Math.max(best, game.score);
   let playing = false, selected = -1, cursor = null, active = null, keyboardAim = false;
   const touches = new Map();
@@ -237,9 +240,9 @@
   }
   function save() {
     if (game.score > best) best = game.score;
-    store.set('bygga.best', String(best));
-    if (game.over) store.remove('bygga.save.v1');
-    else if (playing) store.set('bygga.save.v1', JSON.stringify(game.serialize()));
+    store.set(BEST_KEY, String(best));
+    if (game.over) store.remove(SAVE_KEY);
+    else if (playing) store.set(SAVE_KEY, JSON.stringify(game.serialize()));
   }
   function toast(title, detail) {
     clearTimeout(toastTimer);
@@ -565,7 +568,7 @@
   });
   window.addEventListener('pagehide', () => { if (playing) save(); sound.suspend(); });
   window.addEventListener('storage', event => {
-    if (event.key === 'bygga.best') { best = Math.max(best, validBest(event.newValue)); refresh(); }
+    if (event.key === BEST_KEY) { best = Math.max(best, validBest(event.newValue)); refresh(); }
   });
   syncSound(); refresh();
   document.querySelector('.game').inert = true;

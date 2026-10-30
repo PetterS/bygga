@@ -9,20 +9,6 @@ const piece = (shape = 'single-0', color = 1) => ({shape, color});
 function position(board = E.emptyBoard(), tray = [piece(), piece(), piece()]) {
   const game = new E.Game(rng()); game.board = board; game.tray = tray; return game;
 }
-function solve(board, tray) {
-  if (tray.every(p => !p)) return [];
-  for (let slot = 0; slot < tray.length; slot++) {
-    if (!tray[slot]) continue;
-    const shape = E.getShape(tray[slot]);
-    for (const {x, y} of E.placements(board, shape)) {
-      const remaining = tray.slice(); remaining[slot] = null;
-      const rest = solve(E.simulate(board, shape, x, y).board, remaining);
-      if (rest) return [{slot, x, y}, ...rest];
-    }
-  }
-  return null;
-}
-
 test('catalog has distinct occupied cells, normalized orientations and all basic shapes', () => {
   assert(E.SHAPES.length >= 35);
   assert.equal(E.getShape(piece('large-square-0')).cells.length, 9);
@@ -114,15 +100,16 @@ test('stones reject placement and block their row and column without blocking ot
   assert.equal(result.count, 1); assert.equal(result.gain, 101);
   assert.equal(g.board[0], E.STONE); assert.equal(g.board[1], 2); assert.equal(g.board[8], 3);
 });
-test('each 5000-point crossing turns a distinct square to stone, including occupied squares', () => {
+test('each 5000-point crossing turns an empty square to stone without replacing blocks or stones', () => {
   const g = position(); g.score = 4998; g.random = () => 0;
   assert.deepEqual(g.place(0, 0, 0).stones, []);
   assert.equal(g.score, 4999);
-  assert.deepEqual(g.place(1, 1, 0).stones, [0]);
-  assert.equal(g.score, 5000); assert.equal(g.board[0], E.STONE);
-  assert.deepEqual(g.place(2, 2, 0).stones, []);
+  assert.deepEqual(g.place(1, 1, 0).stones, [2]);
+  assert.equal(g.score, 5000); assert.deepEqual(g.board.slice(0, 3), [1, 1, E.STONE]);
+  assert.deepEqual(g.place(2, 3, 0).stones, []);
   g.score = 9999; g.tray = [piece(), piece(), piece()];
-  assert.deepEqual(g.place(0, 3, 0).stones, [1]);
+  assert.deepEqual(g.place(0, 4, 0).stones, [5]);
+  assert.deepEqual(g.board.slice(0, 6), [1, 1, E.STONE, 1, 1, E.STONE]);
   assert.equal(g.board.filter(c => c === E.STONE).length, 2);
   g.reset(); assert.equal(g.score, 0); assert(g.board.every(c => c === 0));
 });
@@ -149,6 +136,17 @@ test('a new stone is considered immediately when deciding whether the game is ov
   assert.equal(g.board[0], 1); assert.equal(g.board[1], E.STONE);
   assert(g.over); assert(!E.hasMove(g.board, g.tray));
 });
+test('milestones cannot overwrite occupied cells when fewer empty squares remain', () => {
+  const b = Array(64).fill(E.STONE); b[0] = b[1] = 0;
+  for (const empty of [0, 1]) {
+    const board = b.slice(); board[1] = empty ? 0 : 2;
+    const g = position(board); g.score = 4999;
+    const result = g.place(0, 0, 0);
+    assert.equal(result.stones.length, empty);
+    assert.equal(g.board[0], 1); assert.equal(g.board[1], empty ? E.STONE : 2);
+    assert(g.over);
+  }
+});
 test('a nearly stone-filled board still deals three pieces and allows the last legal move', () => {
   const b = Array(64).fill(E.STONE); b[0] = 0; b[1] = 0;
   const g = position(b, [piece(), null, null]); g.random = () => 0;
@@ -164,7 +162,8 @@ test('stones survive save/resume and legacy saves start adding stones at their n
   assert.equal(saved.version, 2);
   assert(restored.restore(saved)); assert.deepEqual(restored.serialize(), saved);
   assert.equal(restored.place(1, 0, 0), null);
-  assert.deepEqual(restored.place(1, 1, 0).stones, [], 'Reload must not repeat a milestone');
+  assert.equal(restored.place(1, 1, 0), null, 'The empty square became stone');
+  assert.deepEqual(restored.place(1, 2, 0).stones, [], 'Reload must not repeat a milestone');
   const legacy = {...position().serialize(), version: 1, score: 9998};
   assert(restored.restore(legacy)); assert(restored.board.every(c => c === 0));
   assert.deepEqual(restored.place(0, 0, 0).stones, []);
@@ -223,18 +222,38 @@ test('save roundtrip clones state and rejects corrupt or impossible saves', () =
     assert.equal(restored.restore(bad), false);
   }
 });
-test('dealt trays have an actual three-placement solution even on crowded boards', () => {
+test('dealt trays offer an opening move even in a single isolated empty square', () => {
   const random = rng(12);
-  let b = E.emptyBoard();
-  for (let i = 0; i < 32; i++) {
+  for (let i = 0; i < 64; i++) {
+    const b = Array(64).fill(E.STONE); b[i] = 0;
     const before = b.slice(), tray = E.deal(b, random);
     assert.deepEqual(b, before, 'Dealing must not alter the real board');
-    assert.equal(tray.length, 3); assert(solve(b, tray), `Unsolvable tray ${i}`);
-    // Choose any legal move, not the dealer's hidden construction.
-    const legal = tray.flatMap(p => E.placements(b, E.getShape(p)).map(spot => ({...spot, p})));
-    const move = legal[Math.floor(random() * legal.length)];
-    b = E.simulate(b, E.getShape(move.p), move.x, move.y).board;
+    assert.equal(tray.length, 3); assert(E.hasMove(b, tray), `No opening move at ${i}`);
   }
+  const full = Array(64).fill(E.STONE), tray = E.deal(full, random);
+  assert.equal(tray.length, 3); assert(!E.hasMove(full, tray));
+});
+test('two-row trap still deals unrestricted corners and squares and can end after its opening move', () => {
+  const b = Array.from({length: 64}, (_, i) => {
+    const x = i % 8, y = Math.floor(i / 8);
+    return y === 0 || y === 7 ? 0 : (x + y) % 3 === 0 ? E.STONE : 1;
+  });
+  const rolls = [0, 0, .95, 0, .25, 0, .999, .999];
+  const tray = E.deal(b, () => rolls.shift());
+  assert.equal(tray[0].shape, 'single-0');
+  assert(tray[1].shape.startsWith('big-corner-'));
+  assert.equal(tray[2].shape, 'square-0');
+  assert(E.hasMove(b, [tray[0]]));
+  assert(!E.hasMove(b, [tray[1], tray[2]]), 'The other two pieces must not be filtered by fit');
+  const g = position(b, tray);
+  assert(g.place(0, 0, 0)); assert(g.over);
+});
+test('a refill guarantees its opening move after the new stone has appeared', () => {
+  const b = Array(64).fill(E.STONE); b[0] = b[1] = b[2] = 0;
+  const g = position(b, [piece(), null, null]); g.score = 4999; g.random = () => .999;
+  const result = g.place(0, 0, 0);
+  assert.deepEqual(result.stones, [2]); assert(result.refill);
+  assert(E.hasMove(g.board, g.tray)); assert(!g.over);
 });
 test('long seeded runs preserve board, score and legal end-state invariants', () => {
   const random = rng(321);
