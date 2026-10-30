@@ -130,6 +130,34 @@
     });
   }
   function requestDraw() { if (!frame) frame = requestAnimationFrame(draw); }
+  function burst(result, now) {
+    const strength = 1 + Math.min(result.count - 1, 3) * .12 + (result.allClear ? .15 : 0);
+    for (const i of result.cells) {
+      const x = PAD + (i % 8 + .5) * UNIT, y = PAD + (Math.floor(i / 8) + .5) * UNIT;
+      const row = result.rows.includes(Math.floor(i / 8)), col = result.columns.includes(i % 8);
+      const colors = palette[result.beforeClear[i]];
+      for (let j = 0; j < 6; j++) {
+        const spark = j >= 4;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (spark ? 210 + Math.random() * 170 : 85 + Math.random() * 130) * strength;
+        // Fragments leave the actual block; row/column clears push across the
+        // cleared line, while an intersection bursts in every direction.
+        particles.push({
+          x: x + (j % 2 ? 1 : -1) * (spark ? 5 : 12),
+          y: y + (j < 2 ? -1 : 1) * (spark ? 5 : 12),
+          vx: Math.cos(angle) * speed * (col ? 1 : .55),
+          vy: Math.sin(angle) * speed * (row ? 1 : .55) - (spark ? 25 : 55),
+          start: now + 55 + Math.random() * 20,
+          life: spark ? 170 + Math.random() * 130 : 420 + Math.random() * 220,
+          size: spark ? 1 + Math.random() : 8 + Math.random() * 8,
+          angle, spin: (Math.random() - .5) * 13,
+          color: colors[j % 2], edge: colors[2], spark,
+        });
+      }
+    }
+    // Rapid consecutive clears may overlap; keep phone rendering bounded.
+    particles = particles.slice(-480);
+  }
   function draw(now) {
     frame = 0;
     if (scoreTween) {
@@ -194,26 +222,53 @@
       else {
         for (const i of effect.cells) {
           const x = PAD + i % 8 * UNIT, y = PAD + Math.floor(i / 8) * UNIT;
-          const fade = Math.max(0, 1 - t / .5);
-          tile(ctx, x, y, UNIT, effect.beforeClear[i], fade, Math.max(.01, 1 - t * 1.8));
+          const fade = Math.max(0, 1 - t / .4);
+          tile(ctx, x, y, UNIT, effect.beforeClear[i], fade, Math.max(.01, 1 - t * 2.5));
         }
         ctx.save(); ctx.globalAlpha = Math.max(0, 1 - t / .28);
         ctx.fillStyle = '#f3ffff'; ctx.shadowColor = '#b4f5ff'; ctx.shadowBlur = 24;
         for (const row of effect.rows) { roundRect(ctx, PAD, PAD + row * UNIT + 1, UNIT * 8, UNIT - 2, 6); ctx.fill(); }
         for (const col of effect.columns) { roundRect(ctx, PAD + col * UNIT + 1, PAD, UNIT - 2, UNIT * 8, 6); ctx.fill(); }
         ctx.restore();
+        if (!reducedMotion.matches && t > .14 && t < .7) {
+          const pulse = (t - .14) / .56, spread = pulse * 22;
+          ctx.save(); ctx.globalAlpha = .38 * (1 - pulse) ** 2;
+          ctx.strokeStyle = '#d7ffef'; ctx.lineWidth = 2 * (1 - pulse) + .5;
+          for (const row of effect.rows) {
+            roundRect(ctx, PAD + 2, PAD + row * UNIT - spread, UNIT * 8 - 4, UNIT + spread * 2, 8); ctx.stroke();
+          }
+          for (const col of effect.columns) {
+            roundRect(ctx, PAD + col * UNIT - spread, PAD + 2, UNIT + spread * 2, UNIT * 8 - 4, 8); ctx.stroke();
+          }
+          ctx.restore();
+        }
       }
     }
     particles = particles.filter(p => now - p.start < p.life);
     for (const p of particles) {
       if (now < p.start) continue;
       const t = (now - p.start) / 1000, progress = t * 1000 / p.life;
+      const travel = (1 - Math.exp(-3 * t)) / 3;
+      const x = p.x + p.vx * travel, y = p.y + p.vy * travel + (p.spark ? 30 : 260) * t * t;
       ctx.save();
-      ctx.globalAlpha = (1 - progress) ** 2;
-      ctx.translate(p.x + p.vx * t, p.y + p.vy * t + 140 * t * t);
-      ctx.rotate(p.angle + t * p.spin);
-      ctx.fillStyle = p.color;
-      ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+      ctx.globalAlpha = (1 - progress) ** (p.spark ? 1.5 : 1.1);
+      ctx.translate(x, y);
+      if (p.spark) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = p.color; ctx.lineWidth = p.size * (1 - progress);
+        ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(0, 0);
+        ctx.lineTo(-p.vx * .035 * (1 - progress), -p.vy * .035 * (1 - progress)); ctx.stroke();
+        ctx.fillStyle = '#fff9dd'; ctx.fillRect(-1, -1, 2, 2);
+      } else {
+        ctx.rotate(p.angle + t * p.spin);
+        const size = p.size * (1 - progress * .35);
+        ctx.beginPath(); ctx.moveTo(-size * .5, -size * .5); ctx.lineTo(size * .45, -size * .4);
+        ctx.lineTo(size * .35, size * .5); ctx.lineTo(-size * .5, size * .25); ctx.closePath();
+        ctx.fillStyle = p.color; ctx.fill();
+        ctx.strokeStyle = p.edge; ctx.lineWidth = 1; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-size * .4, -size * .4); ctx.lineTo(size * .3, -size * .3);
+        ctx.strokeStyle = '#ffffffb0'; ctx.stroke();
+      }
       ctx.restore();
     }
     if (pop && now - pop.start > 190) pop = null;
@@ -265,15 +320,8 @@
     if (!reducedMotion.matches) pop = {start: now, cells: E.getShape(result.piece).cells.map(([x, y]) => (y + result.y) * 8 + x + result.x)};
     if (result.count) {
       lockedUntil = now + (reducedMotion.matches ? 80 : 110);
-      effect = {...result, start: now, duration: reducedMotion.matches ? 80 : 340};
-      if (!reducedMotion.matches) {
-        for (const i of result.cells) for (let j = 0; j < 3; j++) particles.push({
-          x: PAD + (i % 8 + .5) * UNIT, y: PAD + (Math.floor(i / 8) + .5) * UNIT,
-          vx: (Math.random() - .5) * 200, vy: -50 - Math.random() * 180,
-          start: now + 80, life: 400 + Math.random() * 300, size: 3 + Math.random() * 5,
-          color: j === 0 ? '#fff0c4' : palette[result.beforeClear[i]][0], angle: Math.random() * 6, spin: Math.random() * 9,
-        });
-      }
+      effect = {...result, start: now, duration: reducedMotion.matches ? 80 : 360};
+      if (!reducedMotion.matches) burst(result, now);
       const detail = result.allClear ? 'Helt rent!' : result.combo > 1 ? `Kombo ×${result.combo}` : result.count > 1 ? `${result.count} linjer!` : '';
       if (detail) toast(detail, result.allClear ? '+300 bonus' : '');
       $('#points').textContent = `+${format(result.gain)}`;
